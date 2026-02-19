@@ -170,6 +170,7 @@ func (r *DockerRuntime) StartContainer(ctx context.Context, node *types.Node) (s
 	if r.pluginRuntime != nil {
 		cmd = r.pluginRuntime.StartCommand(node)
 		containerHomePath = r.pluginRuntime.ContainerHomePath()
+		cmd = normalizeHomeFlag(cmd, containerHomePath)
 		// Convert env map to Docker format
 		for k, v := range r.pluginRuntime.StartEnv(node) {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
@@ -314,6 +315,7 @@ func (r *DockerRuntime) StartNode(ctx context.Context, node *types.Node, opts St
 	if pluginRuntime != nil {
 		cmd = pluginRuntime.StartCommand(node)
 		containerHomePath = pluginRuntime.ContainerHomePath()
+		cmd = normalizeHomeFlag(cmd, containerHomePath)
 		// Convert env map to Docker format
 		for k, v := range pluginRuntime.StartEnv(node) {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
@@ -625,6 +627,30 @@ func (r *DockerRuntime) ExecInNode(ctx context.Context, nodeID string, command [
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
 	}, nil
+}
+
+func normalizeHomeFlag(args []string, home string) []string {
+	if home == "" {
+		return args
+	}
+
+	normalized := append([]string(nil), args...)
+	for i := 0; i < len(normalized); i++ {
+		if normalized[i] == "--home" {
+			if i+1 < len(normalized) {
+				normalized[i+1] = home
+				return normalized
+			}
+			return append(normalized, home)
+		}
+
+		if strings.HasPrefix(normalized[i], "--home=") {
+			normalized[i] = "--home=" + home
+			return normalized
+		}
+	}
+
+	return append(normalized, "--home", home)
 }
 
 // demuxDockerStream reads the multiplexed Docker stream and separates stdout/stderr.

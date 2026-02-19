@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -40,6 +41,43 @@ type createCall struct {
 	config     *container.Config
 	hostConfig *container.HostConfig
 	name       string
+}
+
+type mockPluginRuntime struct {
+	command       []string
+	containerHome string
+	env           map[string]string
+}
+
+func (m *mockPluginRuntime) StartCommand(_ *types.Node) []string {
+	return append([]string(nil), m.command...)
+}
+
+func (m *mockPluginRuntime) StartEnv(_ *types.Node) map[string]string {
+	if m.env == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m.env))
+	for k, v := range m.env {
+		out[k] = v
+	}
+	return out
+}
+
+func (m *mockPluginRuntime) StopSignal() syscall.Signal {
+	return syscall.SIGTERM
+}
+
+func (m *mockPluginRuntime) GracePeriod() time.Duration {
+	return 10 * time.Second
+}
+
+func (m *mockPluginRuntime) HealthEndpoint(_ *types.Node) string {
+	return "http://localhost:26657/status"
+}
+
+func (m *mockPluginRuntime) ContainerHomePath() string {
+	return m.containerHome
 }
 
 func (m *mockDockerClient) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *specs.Platform, containerName string) (container.CreateResponse, error) {
@@ -160,6 +198,47 @@ func TestContainerName(t *testing.T) {
 			if got != tt.expected {
 				t.Errorf("containerName() = %q, want %q", got, tt.expected)
 			}
+		})
+	}
+}
+
+func TestNormalizeHomeFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		home string
+		want []string
+	}{
+		{
+			name: "replaces separated home flag",
+			args: []string{"start", "--home", "/host/path", "--log_level", "info"},
+			home: "/container/home",
+			want: []string{"start", "--home", "/container/home", "--log_level", "info"},
+		},
+		{
+			name: "replaces equals-form home flag",
+			args: []string{"start", "--home=/host/path", "--log_level", "info"},
+			home: "/container/home",
+			want: []string{"start", "--home=/container/home", "--log_level", "info"},
+		},
+		{
+			name: "appends home when missing",
+			args: []string{"start"},
+			home: "/container/home",
+			want: []string{"start", "--home", "/container/home"},
+		},
+		{
+			name: "no-op when home is empty",
+			args: []string{"start", "--home", "/host/path"},
+			home: "",
+			want: []string{"start", "--home", "/host/path"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeHomeFlag(tc.args, tc.home)
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }
@@ -714,6 +793,45 @@ func TestDockerRuntime_StartNode_WithPortBindings(t *testing.T) {
 	// Verify container config has exposed ports
 	require.NotNil(t, createCall.config.ExposedPorts)
 	assert.Len(t, createCall.config.ExposedPorts, 4)
+}
+
+func TestDockerRuntime_StartNode_NormalizesHomeFlagToContainerPath(t *testing.T) {
+	mock := &mockDockerClient{}
+	rt := &DockerRuntime{
+		client:       mock,
+		logger:       testLogger(),
+		defaultImage: "stablelabs/stabled:latest",
+		containers:   make(map[string]*containerState),
+	}
+
+	pluginRuntime := &mockPluginRuntime{
+		command:       []string{"start", "--home", "/tmp/host-home"},
+		containerHome: "/home/gaia",
+	}
+
+	node := &types.Node{
+		Metadata: types.ResourceMeta{
+			Name: "test-devnet-validator-0",
+		},
+		Spec: types.NodeSpec{
+			DevnetRef: "test-devnet",
+			Index:     0,
+			Role:      "validator",
+			HomeDir:   "/tmp/host-home",
+		},
+	}
+
+	err := rt.StartNode(context.Background(), node, StartOptions{
+		PluginRuntime: pluginRuntime,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, mock.createCalls, 1)
+	gotCmd := mock.createCalls[0].config.Cmd
+	assert.EqualValues(t, []string{"start", "--home", "/home/gaia"}, gotCmd)
+
+	require.Len(t, mock.createCalls[0].hostConfig.Mounts, 1)
+	assert.Equal(t, "/home/gaia", mock.createCalls[0].hostConfig.Mounts[0].Target)
 }
 
 func TestPortConstants(t *testing.T) {
