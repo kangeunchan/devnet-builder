@@ -26,7 +26,7 @@ func NewCosmosGenesis(binaryName string) *CosmosGenesis {
 		binaryName: binaryName,
 		rpcEndpoints: map[string]string{
 			"mainnet": "https://rpc.cosmos.network",
-			"testnet": "https://rpc.sentry-01.theta-testnet.polypore.xyz",
+			"testnet": "https://cosmos-testnet-rpc.polkachu.com",
 		},
 		snapshotURLs: map[string]string{
 			"mainnet": "", // To be configured per network

@@ -207,7 +207,7 @@ func (m *CosmosModule) StartCommand(homeDir string, networkMode string) []string
     if networkMode == "mainnet" {
         args = append(args, "--chain-id", "cosmoshub-4")
     } else if networkMode == "testnet" {
-        args = append(args, "--chain-id", "theta-testnet-001")
+        args = append(args, "--chain-id", "provider")
     }
     return args
 }
