@@ -196,35 +196,32 @@ func (f *FetcherAdapter) FetchFromRPC(ctx context.Context, endpoint string) ([]b
 
 // fetchGenesisFromRPC fetches genesis from an RPC endpoint and saves to destPath.
 func (f *FetcherAdapter) fetchGenesisFromRPC(ctx context.Context, rpcEndpoint, destPath string) error {
+	genesis, err := f.fetchGenesisDirect(ctx, rpcEndpoint)
+	if err != nil {
+		return err
+	}
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Write genesis file
+	if err := os.WriteFile(destPath, genesis, 0o644); err != nil {
+		return fmt.Errorf("failed to write genesis file: %w", err)
+	}
+
+	return nil
+}
+
+func (f *FetcherAdapter) fetchGenesisDirect(ctx context.Context, rpcEndpoint string) ([]byte, error) {
 	// Construct genesis endpoint URL
 	genesisURL := strings.TrimSuffix(rpcEndpoint, "/") + "/genesis"
-
 	f.logger.Debug("Fetching genesis from %s", genesisURL)
 
-	// Create HTTP client
-	client := &http.Client{
-		Timeout: 5 * time.Minute,
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, genesisURL, nil)
+	body, err := f.fetchRPCBody(ctx, genesisURL)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to fetch genesis: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to fetch genesis: status %d", resp.StatusCode)
-	}
-
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read genesis response: %w", err)
+		return nil, err
 	}
 
 	// Parse the RPC response
@@ -233,22 +230,41 @@ func (f *FetcherAdapter) fetchGenesisFromRPC(ctx context.Context, rpcEndpoint, d
 			Genesis json.RawMessage `json:"genesis"`
 		} `json:"result"`
 	}
-
 	if err := json.Unmarshal(body, &rpcResponse); err != nil {
-		return fmt.Errorf("failed to parse RPC response: %w", err)
+		return nil, fmt.Errorf("failed to parse RPC response: %w", err)
+	}
+	if len(rpcResponse.Result.Genesis) == 0 {
+		return nil, fmt.Errorf("genesis response is empty")
+	}
+	return rpcResponse.Result.Genesis, nil
+}
+
+func (f *FetcherAdapter) fetchRPCBody(ctx context.Context, url string) ([]byte, error) {
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
 	}
 
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Write genesis file
-	if err := os.WriteFile(destPath, rpcResponse.Result.Genesis, 0644); err != nil {
-		return fmt.Errorf("failed to write genesis file: %w", err)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch genesis: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch genesis: status %d", resp.StatusCode)
 	}
 
-	return nil
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read genesis response: %w", err)
+	}
+
+	return body, nil
 }
 
 // ModifyGenesis applies modifications to a genesis file.
