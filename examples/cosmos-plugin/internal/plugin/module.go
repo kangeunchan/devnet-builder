@@ -3,6 +3,7 @@ package cosmos
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/pkg/network"
@@ -10,7 +11,8 @@ import (
 
 // CosmosNetwork implements network.Module for Cosmos Hub.
 type CosmosNetwork struct {
-	runCmd commandRunnerFunc
+	runCmd           commandRunnerFunc
+	snapshotResolver snapshotResolverFunc
 }
 
 // Option configures CosmosNetwork construction.
@@ -22,7 +24,8 @@ var _ network.FileBasedGenesisModifier = (*CosmosNetwork)(nil)
 // New creates a CosmosNetwork plugin module.
 func New(opts ...Option) *CosmosNetwork {
 	networkModule := &CosmosNetwork{
-		runCmd: runCommand,
+		runCmd:           runCommand,
+		snapshotResolver: resolveLatestPolkachuSnapshotURL,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -40,6 +43,16 @@ func WithCommandRunner(runner func(context.Context, string, ...string) ([]byte, 
 			return
 		}
 		n.runCmd = runner
+	}
+}
+
+// WithSnapshotResolver overrides snapshot URL resolution for this module instance.
+func WithSnapshotResolver(resolver func(networkType string) string) Option {
+	return func(n *CosmosNetwork) {
+		if resolver == nil {
+			return
+		}
+		n.snapshotResolver = resolver
 	}
 }
 
@@ -77,7 +90,7 @@ func (n *CosmosNetwork) BinarySource() network.BinarySource {
 }
 
 func (n *CosmosNetwork) DefaultBinaryVersion() string {
-	return "v18.1.0"
+	return "v25.3.2"
 }
 
 func (n *CosmosNetwork) GetBuildConfig(networkType string) (*network.BuildConfig, error) {
@@ -135,7 +148,7 @@ func (n *CosmosNetwork) DefaultPorts() network.PortConfig {
 // ============================================
 
 func (n *CosmosNetwork) DockerImage() string {
-	return "ghcr.io/cosmos/gaia"
+	return "ghcr.io/cosmos/gaia:" + n.DefaultBinaryVersion()
 }
 
 func (n *CosmosNetwork) DockerImageTag(version string) string {
@@ -226,14 +239,10 @@ func (n *CosmosNetwork) Validate() error {
 // ============================================
 
 func (n *CosmosNetwork) SnapshotURL(networkType string) string {
-	switch networkType {
-	case "mainnet":
-		return mainnetSnapshot
-	case "testnet":
-		return testnetSnapshot
-	default:
+	if n.snapshotResolver == nil {
 		return ""
 	}
+	return strings.TrimSpace(n.snapshotResolver(networkType))
 }
 
 func (n *CosmosNetwork) RPCEndpoint(networkType string) string {
@@ -245,6 +254,22 @@ func (n *CosmosNetwork) RPCEndpoint(networkType string) string {
 	default:
 		return ""
 	}
+}
+
+func (n *CosmosNetwork) SnapshotURLs(networkType string) []string {
+	snapshotURL := n.SnapshotURL(networkType)
+	if snapshotURL == "" {
+		return nil
+	}
+	return []string{snapshotURL}
+}
+
+func (n *CosmosNetwork) RPCEndpoints(networkType string) []string {
+	endpoint := n.RPCEndpoint(networkType)
+	if endpoint == "" {
+		return nil
+	}
+	return []string{endpoint}
 }
 
 func (n *CosmosNetwork) AvailableNetworks() []string {
