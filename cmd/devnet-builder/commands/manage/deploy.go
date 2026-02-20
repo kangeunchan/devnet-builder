@@ -44,6 +44,7 @@ var (
 	deployFork              bool   // Fork live network state via snapshot export
 	deployTestMnemonic      bool   // Use deterministic test mnemonics for validators
 	deployBinary            string // Custom binary path for local mode
+	deploySnapshotTimeout   time.Duration
 )
 
 // DeployResult represents the JSON output for the deploy command.
@@ -143,6 +144,8 @@ Examples:
 	// Fork mode flag - exports genesis from snapshot state instead of RPC genesis
 	cmd.Flags().BoolVar(&deployFork, "fork", true,
 		"Fork live network state (export genesis from snapshot)")
+	cmd.Flags().DurationVar(&deploySnapshotTimeout, "snapshot-timeout", 30*time.Minute,
+		"Snapshot download timeout (e.g., 30m, 2h)")
 
 	return cmd
 }
@@ -195,6 +198,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 	if versionEnv := os.Getenv("DEVNET_NETWORK_VERSION"); versionEnv != "" && !cmd.Flags().Changed("network-version") {
 		fileCfg.NetworkVersion = &versionEnv
+	}
+	if timeoutEnv := os.Getenv("DEVNET_SNAPSHOT_TIMEOUT"); timeoutEnv != "" && !cmd.Flags().Changed("snapshot-timeout") {
+		if parsed, parseErr := time.ParseDuration(timeoutEnv); parseErr == nil {
+			deploySnapshotTimeout = parsed
+		} else {
+			return fmt.Errorf("invalid DEVNET_SNAPSHOT_TIMEOUT %q: %w", timeoutEnv, parseErr)
+		}
 	}
 
 	// Run partial interactive setup for missing base config values
@@ -421,19 +431,20 @@ For more information, see: https://github.com/altuslabsxyz/devnet-builder/blob/m
 	// Note: BinaryPath is used for genesis export, CustomBinaryPath is used for node startup
 	// When --export-version is specified, these may be different binaries
 	provisionInput := dto.ProvisionInput{
-		HomeDir:           homeDir,
-		Network:           deployNetwork,
-		BlockchainNetwork: deployBlockchainNetwork,
-		NumValidators:     deployValidators,
-		NumAccounts:       deployAccounts,
-		Mode:              deployMode,
-		StableVersion:     startVersion,
-		DockerImage:       dockerImage,
-		NoCache:           deployNoCache,
-		CustomBinaryPath:  customBinaryPath, // Binary for node startup
-		UseSnapshot:       deployFork,
-		BinaryPath:        exportBinaryPath, // Binary for genesis export (may differ with --export-version)
-		UseTestMnemonic:   deployTestMnemonic,
+		HomeDir:                 homeDir,
+		Network:                 deployNetwork,
+		BlockchainNetwork:       deployBlockchainNetwork,
+		NumValidators:           deployValidators,
+		NumAccounts:             deployAccounts,
+		Mode:                    deployMode,
+		StableVersion:           startVersion,
+		DockerImage:             dockerImage,
+		NoCache:                 deployNoCache,
+		CustomBinaryPath:        customBinaryPath, // Binary for node startup
+		UseSnapshot:             deployFork,
+		BinaryPath:              exportBinaryPath, // Binary for genesis export (may differ with --export-version)
+		UseTestMnemonic:         deployTestMnemonic,
+		SnapshotDownloadTimeout: deploySnapshotTimeout,
 	}
 
 	_, err = svc.Provision(ctx, provisionInput)

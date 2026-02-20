@@ -1,6 +1,7 @@
 package cosmos
 
 import (
+	"context"
 	"strings"
 	"time"
 )
@@ -40,4 +41,8 @@ func parseRFC3339ToUnixSeconds(v string) int64 {
 		return t.Unix()
 	}
 	return 0
+}
+
+func requestContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), defaultRequestTimeout)
 }

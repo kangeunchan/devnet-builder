@@ -192,10 +192,8 @@ func (n *CosmosNetwork) InitCommand(homeDir, chainID, moniker string) []string {
 
 func (n *CosmosNetwork) StartCommand(homeDir string, networkMode string) []string {
 	args := []string{"start", "--home", homeDir}
-	if networkMode == "mainnet" {
-		args = append(args, "--chain-id", mainnetChainID)
-	} else if networkMode == "testnet" {
-		args = append(args, "--chain-id", testnetChainID)
+	if profile, ok := networkProfileByType(networkMode); ok {
+		args = append(args, "--chain-id", profile.ChainID)
 	}
 	return args
 }
@@ -246,14 +244,10 @@ func (n *CosmosNetwork) SnapshotURL(networkType string) string {
 }
 
 func (n *CosmosNetwork) RPCEndpoint(networkType string) string {
-	switch networkType {
-	case "mainnet":
-		return mainnetRPC
-	case "testnet":
-		return testnetRPC
-	default:
-		return ""
+	if profile, ok := networkProfileByType(networkType); ok {
+		return profile.RPCEndpoint
 	}
+	return ""
 }
 
 func (n *CosmosNetwork) SnapshotURLs(networkType string) []string {
@@ -273,5 +267,5 @@ func (n *CosmosNetwork) RPCEndpoints(networkType string) []string {
 }
 
 func (n *CosmosNetwork) AvailableNetworks() []string {
-	return []string{"mainnet", "testnet"}
+	return []string{networkMainnet, networkTestnet}
 }

@@ -150,25 +150,20 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 		}
 		switch key {
 		case "gov":
-			module, err := readObjectValue(dec)
+			module, err := decodeModuleObject(dec, "gov")
 			if err != nil {
-				return fmt.Errorf("failed to decode gov module: %w", err)
-			}
-			module = ensureMap(module)
-			n.patchGovParams(map[string]interface{}{"gov": module}, cfg)
-
-			if err := writeObjectKey(w, &first, key); err != nil {
 				return err
 			}
-			if err := writeJSONValue(w, module); err != nil {
-				return fmt.Errorf("failed to write gov module: %w", err)
+			n.patchGovParams(map[string]interface{}{"gov": module}, cfg)
+
+			if err := writeModuleObject(w, &first, key, module); err != nil {
+				return err
 			}
 		case "staking":
-			module, err := readObjectValue(dec)
+			module, err := decodeModuleObject(dec, "staking")
 			if err != nil {
-				return fmt.Errorf("failed to decode staking module: %w", err)
+				return err
 			}
-			module = ensureMap(module)
 			actualValidatorAccounts, actualBondedTotal := n.patchStakingState(
 				map[string]interface{}{"staking": module}, opts, cfg)
 			if actualValidatorAccounts != nil {
@@ -176,75 +171,56 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 				bondedTotal = actualBondedTotal
 			}
 
-			if err := writeObjectKey(w, &first, key); err != nil {
+			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
-			}
-			if err := writeJSONValue(w, module); err != nil {
-				return fmt.Errorf("failed to write staking module: %w", err)
 			}
 		case "slashing":
-			module, err := readObjectValue(dec)
+			module, err := decodeModuleObject(dec, "slashing")
 			if err != nil {
-				return fmt.Errorf("failed to decode slashing module: %w", err)
+				return err
 			}
-			module = ensureMap(module)
 			n.patchSlashingState(map[string]interface{}{"slashing": module})
 
-			if err := writeObjectKey(w, &first, key); err != nil {
+			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
-			}
-			if err := writeJSONValue(w, module); err != nil {
-				return fmt.Errorf("failed to write slashing module: %w", err)
 			}
 		case "distribution":
-			module, err := readObjectValue(dec)
+			module, err := decodeModuleObject(dec, "distribution")
 			if err != nil {
-				return fmt.Errorf("failed to decode distribution module: %w", err)
-			}
-			module = ensureMap(module)
-			n.patchDistributionState(map[string]interface{}{"distribution": module}, opts)
-
-			if err := writeObjectKey(w, &first, key); err != nil {
 				return err
 			}
-			if err := writeJSONValue(w, module); err != nil {
-				return fmt.Errorf("failed to write distribution module: %w", err)
+			n.patchDistributionState(map[string]interface{}{"distribution": module}, opts)
+
+			if err := writeModuleObject(w, &first, key, module); err != nil {
+				return err
 			}
 		case "auth":
-			module, err := readObjectValue(dec)
+			module, err := decodeModuleObject(dec, "auth")
 			if err != nil {
-				return fmt.Errorf("failed to decode auth module: %w", err)
+				return err
 			}
-			module = ensureMap(module)
 			ensureAuthBaseAccounts(module, mergeUniqueAddresses(validatorAccounts, extraAccountAddresses))
 			authModule = module
 
-			if err := writeObjectKey(w, &first, key); err != nil {
+			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
-			}
-			if err := writeJSONValue(w, module); err != nil {
-				return fmt.Errorf("failed to write auth module: %w", err)
 			}
 		case "bank":
-			module, err := readObjectValue(dec)
+			module, err := decodeModuleObject(dec, "bank")
 			if err != nil {
-				return fmt.Errorf("failed to decode bank module: %w", err)
-			}
-			deferredBank = ensureMap(module)
-			hasDeferredBank = true
-		case "genutil":
-			module, err := readObjectValue(dec)
-			if err != nil {
-				return fmt.Errorf("failed to decode genutil module: %w", err)
-			}
-			module = ensureMap(module)
-			module["gen_txs"] = []interface{}{}
-
-			if err := writeObjectKey(w, &first, key); err != nil {
 				return err
 			}
-			if err := writeJSONValue(w, module); err != nil {
-				return fmt.Errorf("failed to write genutil module: %w", err)
+			deferredBank = module
+			hasDeferredBank = true
+		case "genutil":
+			module, err := decodeModuleObject(dec, "genutil")
+			if err != nil {
+				return err
+			}
+			module["gen_txs"] = []interface{}{}
+
+			if err := writeModuleObject(w, &first, key, module); err != nil {
+				return err
 			}
 		default:
 			if err := writeObjectKey(w, &first, key); err != nil {
@@ -276,4 +252,22 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 
 	_, err = io.WriteString(w, "}")
 	return err
+}
+
+func decodeModuleObject(dec *json.Decoder, moduleName string) (map[string]interface{}, error) {
+	module, err := readObjectValue(dec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode %s module: %w", moduleName, err)
+	}
+	return ensureMap(module), nil
+}
+
+func writeModuleObject(w io.Writer, first *bool, moduleName string, module map[string]interface{}) error {
+	if err := writeObjectKey(w, first, moduleName); err != nil {
+		return err
+	}
+	if err := writeJSONValue(w, module); err != nil {
+		return fmt.Errorf("failed to write %s module: %w", moduleName, err)
+	}
+	return nil
 }

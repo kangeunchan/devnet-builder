@@ -19,6 +19,8 @@ func TestResolveLatestPolkachuSnapshotURL_Mainnet(t *testing.T) {
 		httpClient = originalClient
 	})
 
+	mainnetProfile := defaultNetworkProfile(networkMainnet)
+
 	mainnetHTML := `<html><body>
 	<a href="https://snapshots.polkachu.com/snapshots/cosmos/cosmos_30000001.tar.lz4">latest</a>
 	<a href="https://snapshots.polkachu.com/snapshots/cosmos/cosmos_29999999.tar.lz4">older</a>
@@ -26,7 +28,7 @@ func TestResolveLatestPolkachuSnapshotURL_Mainnet(t *testing.T) {
 
 	httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.URL.String() != mainnetSnapshotIndexURL {
+			if req.URL.String() != mainnetProfile.SnapshotIndexURL {
 				t.Fatalf("unexpected URL: %s", req.URL.String())
 			}
 
@@ -51,13 +53,16 @@ func TestResolveLatestPolkachuSnapshotURL_TestnetAndNoMatch(t *testing.T) {
 		httpClient = originalClient
 	})
 
+	mainnetProfile := defaultNetworkProfile(networkMainnet)
+	testnetProfile := defaultNetworkProfile(networkTestnet)
+
 	httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			var body string
 			switch req.URL.String() {
-			case testnetSnapshotIndexURL:
+			case testnetProfile.SnapshotIndexURL:
 				body = `<a href="https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_16000000.tar.lz4">latest</a>`
-			case mainnetSnapshotIndexURL:
+			case mainnetProfile.SnapshotIndexURL:
 				body = `<html><body>no snapshot links</body></html>`
 			default:
 				body = ""

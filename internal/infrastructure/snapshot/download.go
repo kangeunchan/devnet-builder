@@ -3,6 +3,7 @@ package snapshot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -113,15 +114,39 @@ func Download(ctx context.Context, opts DownloadOptions) (*SnapshotCache, error)
 
 // downloadFile performs the actual HTTP download.
 func downloadFile(ctx context.Context, url, destPath string, logger *output.Logger, progress ports.ProgressReporter) error {
+	// Respect caller context deadline when provided (allows configurable timeout),
+	// otherwise fallback to default download timeout.
+	timeout := DownloadTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return context.DeadlineExceeded
+		}
+		timeout = remaining
+	}
+
 	// Create HTTP client with timeout
 	client := &http.Client{
-		Timeout: DownloadTimeout,
+		Timeout: timeout,
+	}
+
+	tmpPath := destPath + ".tmp"
+	resumeOffset, err := partialFileSize(tmpPath)
+	if err != nil {
+		return fmt.Errorf("failed to check partial download: %w", err)
+	}
+
+	if logger != nil {
+		logger.StopSpinner()
 	}
 
 	// Create request with context
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
+	}
+	if resumeOffset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeOffset))
 	}
 
 	// Start download
@@ -131,27 +156,49 @@ func downloadFile(ctx context.Context, url, destPath string, logger *output.Logg
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	resumeAccepted := resumeOffset > 0 && resp.StatusCode == http.StatusPartialContent
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && resumeOffset > 0 {
+		if removeErr := os.Remove(tmpPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("failed to reset invalid partial download: %w", removeErr)
+		}
+		return fmt.Errorf("resume range rejected by server (status %d), partial download reset", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK && !resumeAccepted {
 		return fmt.Errorf("download failed with status %d", resp.StatusCode)
 	}
 
+	// If server does not support range requests, restart from scratch.
+	if resumeOffset > 0 && !resumeAccepted {
+		if removeErr := os.Remove(tmpPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("failed to reset partial download: %w", removeErr)
+		}
+		resumeOffset = 0
+	}
+
 	// Create destination file
-	tmpPath := destPath + ".tmp"
-	out, err := os.Create(tmpPath)
+	var out *os.File
+	if resumeAccepted {
+		out, err = os.OpenFile(tmpPath, os.O_WRONLY|os.O_APPEND, 0o644)
+	} else {
+		out, err = os.Create(tmpPath)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
 	defer out.Close()
 
 	// Copy with progress
-	contentLength := resp.ContentLength
-	var downloaded int64
+	total := resp.ContentLength
+	if resumeAccepted && total > 0 {
+		total += resumeOffset
+	}
+	downloaded := resumeOffset
 	now := time.Now()
 
 	// Create progress reporter
 	progressReader := &progressReader{
 		reader:         resp.Body,
-		total:          contentLength,
+		total:          total,
 		downloaded:     &downloaded,
 		logger:         logger,
 		progress:       progress,
@@ -168,24 +215,34 @@ func downloadFile(ctx context.Context, url, destPath string, logger *output.Logg
 	// Note: Terminal progress bar removed - progress reported via ProgressReporter
 
 	if err != nil {
-		os.Remove(tmpPath)
+		// Keep partial .tmp file for resume on retry.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("download interrupted: %w", err)
+		}
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 
 	// Close file before rename
-	out.Close()
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
+	}
+
+	if logger != nil {
+		logger.Progress(downloaded, total, progressReader.currentSpeed)
+		logger.ProgressComplete()
+	}
 
 	// Validate downloaded file size matches Content-Length
 	// This prevents truncated downloads from being cached as valid
-	if contentLength > 0 {
+	if total > 0 {
 		info, err := os.Stat(tmpPath)
 		if err != nil {
 			os.Remove(tmpPath)
 			return fmt.Errorf("failed to stat downloaded file: %w", err)
 		}
-		if info.Size() != contentLength {
+		if info.Size() != total {
 			os.Remove(tmpPath)
-			return fmt.Errorf("incomplete download: got %d bytes, expected %d bytes", info.Size(), contentLength)
+			return fmt.Errorf("incomplete download: got %d bytes, expected %d bytes", info.Size(), total)
 		}
 	}
 
@@ -244,9 +301,23 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 				Speed:   pr.currentSpeed,
 			})
 		}
+		if pr.logger != nil {
+			pr.logger.Progress(*pr.downloaded, pr.total, pr.currentSpeed)
+		}
 	}
 
 	return n, err
+}
+
+func partialFileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return info.Size(), nil
 }
 
 // DetectDecompressor determines the decompressor and extension from URL.

@@ -9,27 +9,18 @@ import (
 func (n *CosmosNetwork) resolveRPCEndpoint(raw, networkType string) string {
 	endpoint := strings.TrimSpace(raw)
 	if endpoint == "" {
-		if networkType == "testnet" {
-			return testnetRPC
-		}
-		return mainnetRPC
+		return defaultNetworkProfile(networkType).RPCEndpoint
 	}
 
 	endpoint = normalizeEndpoint(endpoint)
-
-	if strings.Contains(endpoint, "cosmos-api.polkachu.com") {
-		return strings.Replace(endpoint, "cosmos-api.polkachu.com", "cosmos-rpc.polkachu.com", 1)
-	}
-	if strings.Contains(endpoint, "cosmos-testnet-api.polkachu.com") {
-		return strings.Replace(endpoint, "cosmos-testnet-api.polkachu.com", "cosmos-testnet-rpc.polkachu.com", 1)
-	}
+	endpoint = replaceKnownHost(endpoint, restToRPCHostMap())
 
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return endpoint
 	}
-	host, port, err := net.SplitHostPort(u.Host)
-	if err == nil {
+
+	if host, port, splitErr := net.SplitHostPort(u.Host); splitErr == nil {
 		if port == "1317" {
 			u.Host = net.JoinHostPort(host, "26657")
 		}
@@ -46,27 +37,18 @@ func (n *CosmosNetwork) resolveRPCEndpoint(raw, networkType string) string {
 func (n *CosmosNetwork) resolveRESTEndpoint(raw, networkType string) string {
 	endpoint := strings.TrimSpace(raw)
 	if endpoint == "" {
-		if networkType == "testnet" {
-			return testnetREST
-		}
-		return mainnetREST
+		return defaultNetworkProfile(networkType).RESTEndpoint
 	}
 
 	endpoint = normalizeEndpoint(endpoint)
-
-	if strings.Contains(endpoint, "cosmos-rpc.polkachu.com") {
-		return strings.Replace(endpoint, "cosmos-rpc.polkachu.com", "cosmos-api.polkachu.com", 1)
-	}
-	if strings.Contains(endpoint, "cosmos-testnet-rpc.polkachu.com") {
-		return strings.Replace(endpoint, "cosmos-testnet-rpc.polkachu.com", "cosmos-testnet-api.polkachu.com", 1)
-	}
+	endpoint = replaceKnownHost(endpoint, rpcToRESTHostMap())
 
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return endpoint
 	}
-	host, port, err := net.SplitHostPort(u.Host)
-	if err == nil {
+
+	if host, port, splitErr := net.SplitHostPort(u.Host); splitErr == nil {
 		if port == "26657" {
 			u.Host = net.JoinHostPort(host, "1317")
 		}
@@ -99,4 +81,46 @@ func isLocalHost(host string) bool {
 		}
 	}
 	return h == "localhost" || h == "127.0.0.1"
+}
+
+func restToRPCHostMap() map[string]string {
+	mapping := make(map[string]string, len(networkProfiles))
+	for _, profile := range allNetworkProfiles() {
+		restHost := endpointHost(profile.RESTEndpoint)
+		rpcHost := endpointHost(profile.RPCEndpoint)
+		if restHost == "" || rpcHost == "" {
+			continue
+		}
+		mapping[restHost] = rpcHost
+	}
+	return mapping
+}
+
+func rpcToRESTHostMap() map[string]string {
+	mapping := make(map[string]string, len(networkProfiles))
+	for _, profile := range allNetworkProfiles() {
+		restHost := endpointHost(profile.RESTEndpoint)
+		rpcHost := endpointHost(profile.RPCEndpoint)
+		if restHost == "" || rpcHost == "" {
+			continue
+		}
+		mapping[rpcHost] = restHost
+	}
+	return mapping
+}
+
+func replaceKnownHost(raw string, hostMap map[string]string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+
+	hostname := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	updatedHost, ok := hostMap[hostname]
+	if !ok || updatedHost == "" {
+		return raw
+	}
+
+	u.Host = updatedHost
+	return strings.TrimRight(u.String(), "/")
 }

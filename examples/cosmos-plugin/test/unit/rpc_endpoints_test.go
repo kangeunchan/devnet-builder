@@ -9,10 +9,10 @@ import (
 func TestRPCEndpoint_Defaults(t *testing.T) {
 	networkModule := cosmos.New()
 
-	if got := networkModule.RPCEndpoint("mainnet"); got != "https://cosmos-rpc.polkachu.com" {
+	if got := networkModule.RPCEndpoint("mainnet"); got != "https://cosmoshub.rpc.kjnodes.com" {
 		t.Fatalf("expected mainnet rpc endpoint, got %q", got)
 	}
-	if got := networkModule.RPCEndpoint("testnet"); got != "https://cosmos-testnet-rpc.polkachu.com" {
+	if got := networkModule.RPCEndpoint("testnet"); got != "https://cosmoshub-testnet.rpc.kjnodes.com" {
 		t.Fatalf("expected testnet rpc endpoint, got %q", got)
 	}
 }

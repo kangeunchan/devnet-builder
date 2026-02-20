@@ -14,12 +14,12 @@ func getJSON(ctx context.Context, endpoint string, out interface{}) error {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("build request %q: %w", endpoint, err)
 	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("request %q failed: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
 
@@ -33,7 +33,7 @@ func getJSON(ctx context.Context, endpoint string, out interface{}) error {
 
 	dec := json.NewDecoder(resp.Body)
 	if err := dec.Decode(out); err != nil {
-		return err
+		return fmt.Errorf("decode response from %q: %w", endpoint, err)
 	}
 
 	return nil
