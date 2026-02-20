@@ -25,6 +25,9 @@ const (
 
 	// DockerStopTimeout is the timeout for gracefully stopping a container.
 	DockerStopTimeout = 30 * time.Second
+
+	// DefaultDockerHomeDir is the default chain home inside Docker containers.
+	DefaultDockerHomeDir = "/data"
 )
 
 // ResourceLimits defines container resource constraints
@@ -69,29 +72,62 @@ type ContainerConfig struct {
 // DockerManager manages nodes running in Docker containers.
 type DockerManager struct {
 	Image      string
+	BinaryName string
+	HomeDir    string
+	EVMChainID string
+	Logger     *output.Logger
+}
+
+// DockerManagerConfig configures DockerManager creation.
+type DockerManagerConfig struct {
+	Image      string
+	BinaryName string
+	HomeDir    string
 	EVMChainID string
 	Logger     *output.Logger
 }
 
 // NewDockerManager creates a new DockerManager.
 func NewDockerManager(image string, logger *output.Logger) *DockerManager {
-	if image == "" {
-		image = DefaultDockerImage
-	}
-	if logger == nil {
-		logger = output.DefaultLogger
-	}
-	return &DockerManager{
+	return NewDockerManagerWithConfig(DockerManagerConfig{
 		Image:  image,
 		Logger: logger,
-	}
+	})
 }
 
 // NewDockerManagerWithEVMChainID creates a new DockerManager with EVM chain ID.
 func NewDockerManagerWithEVMChainID(image string, evmChainID string, logger *output.Logger) *DockerManager {
-	m := NewDockerManager(image, logger)
-	m.EVMChainID = evmChainID
-	return m
+	return NewDockerManagerWithConfig(DockerManagerConfig{
+		Image:      image,
+		EVMChainID: evmChainID,
+		Logger:     logger,
+	})
+}
+
+// NewDockerManagerWithConfig creates a new DockerManager with explicit runtime options.
+func NewDockerManagerWithConfig(cfg DockerManagerConfig) *DockerManager {
+	image := strings.TrimSpace(cfg.Image)
+	if image == "" {
+		image = DefaultDockerImage
+	}
+
+	homeDir := strings.TrimSpace(cfg.HomeDir)
+	if homeDir == "" {
+		homeDir = DefaultDockerHomeDir
+	}
+
+	logger := cfg.Logger
+	if logger == nil {
+		logger = output.DefaultLogger
+	}
+
+	return &DockerManager{
+		Image:      image,
+		BinaryName: strings.TrimSpace(cfg.BinaryName),
+		HomeDir:    homeDir,
+		EVMChainID: cfg.EVMChainID,
+		Logger:     logger,
+	}
 }
 
 // Start starts a node in a Docker container (backward compatible).
@@ -156,22 +192,19 @@ func (m *DockerManager) StartWithConfig(ctx context.Context, config *ContainerCo
 	}
 
 	// User and environment
+	containerHome := m.containerHomeDir()
 	args = append(args,
 		"--user", getCurrentUserID(),
-		"-e", "HOME=/data",
-		"-v", fmt.Sprintf("%s:/data", node.HomeDir),
-		"-v", fmt.Sprintf("%s:/data/config/genesis.json:ro", config.GenesisPath),
+		"-e", fmt.Sprintf("HOME=%s", containerHome),
+		"-v", fmt.Sprintf("%s:%s", node.HomeDir, containerHome),
+		"-v", fmt.Sprintf("%s:%s/config/genesis.json:ro", config.GenesisPath, containerHome),
+		"--entrypoint", m.containerBinary(),
 		m.Image,
 	)
 
-	// GHCR images have stabled as entrypoint, others need explicit command
-	if !m.isGHCRImage() {
-		args = append(args, "stabled")
-	}
-
 	// Chain start command
 	args = append(args, "start",
-		"--home", "/data",
+		"--home", containerHome,
 		fmt.Sprintf("--rpc.laddr=tcp://0.0.0.0:%d", node.Ports.RPC),
 		fmt.Sprintf("--p2p.laddr=tcp://0.0.0.0:%d", node.Ports.P2P),
 		fmt.Sprintf("--grpc.address=0.0.0.0:%d", node.Ports.GRPC),
@@ -399,28 +432,61 @@ func IsDockerAvailable(ctx context.Context) bool {
 	return cmd.Run() == nil
 }
 
-// isGHCRImage returns true if the image is from GitHub Container Registry.
-// GHCR images have stabled as entrypoint, so we don't need to prefix commands.
-func (m *DockerManager) isGHCRImage() bool {
-	return strings.HasPrefix(m.Image, "ghcr.io/")
+func (m *DockerManager) containerHomeDir() string {
+	home := strings.TrimSpace(m.HomeDir)
+	if home != "" {
+		return home
+	}
+	return DefaultDockerHomeDir
+}
+
+func (m *DockerManager) containerBinary() string {
+	if name := strings.TrimSpace(m.BinaryName); name != "" {
+		return name
+	}
+
+	ref := strings.TrimSpace(m.Image)
+	if ref == "" {
+		return "stabled"
+	}
+
+	if digestIdx := strings.Index(ref, "@"); digestIdx >= 0 {
+		ref = ref[:digestIdx]
+	}
+
+	lastSlash := strings.LastIndex(ref, "/")
+	lastColon := strings.LastIndex(ref, ":")
+	if lastColon > lastSlash {
+		ref = ref[:lastColon]
+	}
+
+	name := ref
+	if lastSlash >= 0 {
+		name = ref[lastSlash+1:]
+	}
+	if name == "" {
+		return "stabled"
+	}
+	if strings.HasSuffix(name, "d") {
+		return name
+	}
+	return name + "d"
 }
 
 // Init runs `stabled init` for a node in Docker.
 func (m *DockerManager) Init(ctx context.Context, nodeDir, moniker, chainID string) error {
+	containerHome := m.containerHomeDir()
 	args := []string{
 		"run", "--rm",
 		"--user", getCurrentUserID(),
-		"-e", "HOME=/home/stabled",
-		"-v", fmt.Sprintf("%s:/home/stabled", nodeDir),
+		"-e", fmt.Sprintf("HOME=%s", containerHome),
+		"-v", fmt.Sprintf("%s:%s", nodeDir, containerHome),
+		"--entrypoint", m.containerBinary(),
 		m.Image,
-	}
-	// GHCR images have stabled as entrypoint, others need explicit command
-	if !m.isGHCRImage() {
-		args = append(args, "stabled")
 	}
 	args = append(args, "init", moniker,
 		"--chain-id", chainID,
-		"--home", "/home/stabled",
+		"--home", containerHome,
 	)
 
 	m.Logger.Debug("Docker init: docker %s", strings.Join(args, " "))
@@ -435,19 +501,17 @@ func (m *DockerManager) Init(ctx context.Context, nodeDir, moniker, chainID stri
 
 // GetNodeID retrieves the node ID using `stabled comet show-node-id`.
 func (m *DockerManager) GetNodeID(ctx context.Context, nodeDir string) (string, error) {
+	containerHome := m.containerHomeDir()
 	args := []string{
 		"run", "--rm",
 		"--user", getCurrentUserID(),
-		"-e", "HOME=/home/stabled",
-		"-v", fmt.Sprintf("%s:/home/stabled", nodeDir),
+		"-e", fmt.Sprintf("HOME=%s", containerHome),
+		"-v", fmt.Sprintf("%s:%s", nodeDir, containerHome),
+		"--entrypoint", m.containerBinary(),
 		m.Image,
 	}
-	// GHCR images have stabled as entrypoint, others need explicit command
-	if !m.isGHCRImage() {
-		args = append(args, "stabled")
-	}
 	args = append(args, "comet", "show-node-id",
-		"--home", "/home/stabled",
+		"--home", containerHome,
 	)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -460,19 +524,17 @@ func (m *DockerManager) GetNodeID(ctx context.Context, nodeDir string) (string, 
 
 // Export runs `stabled export` to export the current state as genesis.
 func (m *DockerManager) Export(ctx context.Context, nodeDir, destPath string) error {
+	containerHome := m.containerHomeDir()
 	args := []string{
 		"run", "--rm",
 		"--user", getCurrentUserID(),
-		"-e", "HOME=/home/stabled",
-		"-v", fmt.Sprintf("%s:/home/stabled", nodeDir),
+		"-e", fmt.Sprintf("HOME=%s", containerHome),
+		"-v", fmt.Sprintf("%s:%s", nodeDir, containerHome),
+		"--entrypoint", m.containerBinary(),
 		m.Image,
 	}
-	// GHCR images have stabled as entrypoint, others need explicit command
-	if !m.isGHCRImage() {
-		args = append(args, "stabled")
-	}
 	args = append(args, "export",
-		"--home", "/home/stabled",
+		"--home", containerHome,
 	)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
