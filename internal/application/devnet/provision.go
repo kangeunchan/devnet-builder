@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cosmos/cosmos-sdk/types/bech32"
@@ -87,26 +88,29 @@ func (uc *ProvisionUseCase) Execute(ctx context.Context, input dto.ProvisionInpu
 		CurrentVersion:    input.StableVersion, // Initially same as deployed version
 		CreatedAt:         time.Now(),
 	}
-
-	// Get RPC endpoint for fetching genesis
-	rpcEndpoint := ""
 	if uc.networkModule != nil {
-		rpcEndpoint = uc.networkModule.RPCEndpoint(input.Network)
+		metadata.BinaryName = uc.networkModule.BinaryName()
+		if metadata.DockerImage == "" && execMode == types.ExecutionModeDocker {
+			metadata.DockerImage = uc.networkModule.DockerImage()
+		}
 	}
 
-	// Fetch genesis from RPC (required for initial provisioning)
+	// Fetch genesis from RPC (required for initial provisioning).
+	rpcEndpoint := uc.resolveRPCEndpoint(input.Network)
 	if rpcEndpoint == "" {
 		return nil, fmt.Errorf("no RPC endpoint available for network: %s", input.Network)
 	}
-
 	uc.logger.Info("Fetching genesis from RPC %s...", rpcEndpoint)
-	rpcGenesis, err := uc.genesisSvc.FetchFromRPC(ctx, rpcEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch genesis from RPC: %w", err)
+	rpcGenesis, fetchErr := uc.genesisSvc.FetchFromRPC(ctx, rpcEndpoint)
+	if fetchErr != nil {
+		return nil, fmt.Errorf("failed to fetch genesis from RPC %s: %w", rpcEndpoint, fetchErr)
 	}
 
 	// Use snapshot-based export if requested
-	var genesis []byte
+	var (
+		genesis []byte
+		err     error
+	)
 	if input.UseSnapshot && uc.stateExportSvc != nil {
 		uc.logger.Info("Exporting genesis from snapshot state...")
 		genesis, err = uc.exportGenesisFromSnapshot(ctx, input, rpcGenesis)
@@ -143,15 +147,16 @@ func (uc *ProvisionUseCase) Execute(ctx context.Context, input dto.ProvisionInpu
 	}
 
 	// Step 2.2: Create and save additional account keys (for testing/transactions)
+	var additionalAccountKeys []*ports.AccountKeyInfo
 	if input.NumAccounts > 0 {
 		uc.logger.Info("Creating %d additional account keys...", input.NumAccounts)
-		additionalAccounts, err := uc.createAdditionalAccountKeys(ctx, accountsDir, input.NumAccounts, input.UseTestMnemonic, input.NumValidators)
+		additionalAccountKeys, err = uc.createAdditionalAccountKeys(ctx, accountsDir, input.NumAccounts, input.UseTestMnemonic, input.NumValidators)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create additional account keys: %w", err)
 		}
 
 		uc.logger.Debug("Saving account key information...")
-		if err := uc.saveAccountKeys(input.HomeDir, additionalAccounts); err != nil {
+		if err := uc.saveAccountKeys(input.HomeDir, additionalAccountKeys); err != nil {
 			return nil, fmt.Errorf("failed to save account keys: %w", err)
 		}
 	}
@@ -176,7 +181,13 @@ func (uc *ProvisionUseCase) Execute(ctx context.Context, input dto.ProvisionInpu
 			ChainID:       chainID,
 			NumValidators: input.NumValidators,
 			AddValidators: validators,
+			AddAccounts:   buildGenesisAccounts(additionalAccountKeys),
 		}
+		uc.logger.Debug(
+			"Prepared genesis modify options: validators=%d add_accounts=%d",
+			len(opts.AddValidators),
+			len(opts.AddAccounts),
+		)
 
 		// Check genesis size - gRPC has 4MB default limit
 		const grpcSizeLimit = 4 * 1024 * 1024 // 4MB
@@ -555,6 +566,46 @@ func (uc *ProvisionUseCase) saveAccountKeys(homeDir string, accountKeys []*ports
 	return nil
 }
 
+func buildGenesisAccounts(accountKeys []*ports.AccountKeyInfo) []ports.AccountInfo {
+	if len(accountKeys) == 0 {
+		return nil
+	}
+
+	accounts := make([]ports.AccountInfo, 0, len(accountKeys))
+	for _, key := range accountKeys {
+		if key == nil || key.Address == "" {
+			continue
+		}
+
+		accounts = append(accounts, ports.AccountInfo{
+			Name:    key.Name,
+			Address: key.Address,
+		})
+	}
+
+	return accounts
+}
+
+func (uc *ProvisionUseCase) resolveRPCEndpoint(networkType string) string {
+	if uc.networkModule == nil {
+		return ""
+	}
+
+	return strings.TrimSpace(uc.networkModule.RPCEndpoint(networkType))
+}
+
+func (uc *ProvisionUseCase) resolveSnapshotURL(input dto.ProvisionInput) string {
+	if override := strings.TrimSpace(input.SnapshotURL); override != "" {
+		return override
+	}
+
+	if uc.networkModule == nil {
+		return ""
+	}
+
+	return strings.TrimSpace(uc.networkModule.SnapshotURL(input.Network))
+}
+
 // buildValidatorInfo combines consensus keys from nodes with account addresses.
 // - ConsPubKey: from priv_validator_key.json (ed25519) for block signing
 // - OperatorAddress: from account key (secp256k1) for transaction signing
@@ -730,29 +781,39 @@ func (uc *ProvisionUseCase) buildPersistentPeers(nodes []*ports.NodeMetadata) st
 // 4. Export genesis from snapshot state
 // 5. Return exported genesis
 func (uc *ProvisionUseCase) exportGenesisFromSnapshot(ctx context.Context, input dto.ProvisionInput, rpcGenesis []byte) ([]byte, error) {
-	// Validate binary path
-	if input.BinaryPath == "" {
-		return nil, fmt.Errorf("binary path is required for snapshot-based export")
+	binaryPath := strings.TrimSpace(input.BinaryPath)
+	dockerImage := strings.TrimSpace(input.DockerImage)
+	binaryName := ""
+	dockerHomeDir := ""
+	if uc.networkModule != nil {
+		if dockerImage == "" {
+			dockerImage = strings.TrimSpace(uc.networkModule.DockerImage())
+		}
+		binaryName = strings.TrimSpace(uc.networkModule.BinaryName())
+		dockerHomeDir = strings.TrimSpace(uc.networkModule.DockerHomeDir())
 	}
 
-	// Get snapshot URL from plugin
-	snapshotURL := input.SnapshotURL
-	if snapshotURL == "" && uc.networkModule != nil {
-		snapshotURL = uc.networkModule.SnapshotURL(input.Network)
+	// Snapshot export requires either a local binary or a docker image.
+	if binaryPath == "" && dockerImage == "" {
+		return nil, fmt.Errorf("snapshot export requires binary path or docker image")
 	}
+
+	// Resolve snapshot URL (CLI override or plugin default).
+	snapshotURL := uc.resolveSnapshotURL(input)
 	if snapshotURL == "" {
 		return nil, fmt.Errorf("no snapshot URL available for network: %s", input.Network)
 	}
+
+	cacheKey := fmt.Sprintf("%s-%s", input.BlockchainNetwork, input.Network)
 
 	// Step 1: Download snapshot with caching
 	// Cached snapshots are stored in ~/.devnet-builder/snapshots/<cacheKey>/
 	// Cache expires after 30 minutes by default
 	// Cache key format: "plugin-network" (e.g., "stable-mainnet", "ault-testnet")
-	cacheKey := fmt.Sprintf("%s-%s", input.BlockchainNetwork, input.Network)
 	uc.logger.Info("Downloading snapshot from %s...", snapshotURL)
 	snapshotPath, fromCache, err := uc.snapshotSvc.DownloadWithCache(ctx, snapshotURL, cacheKey, input.NoCache)
 	if err != nil {
-		return nil, fmt.Errorf("failed to download snapshot: %w", err)
+		return nil, fmt.Errorf("failed to download snapshot from %s: %w", snapshotURL, err)
 	}
 	if fromCache {
 		uc.logger.Success("Using cached snapshot")
@@ -797,7 +858,10 @@ func (uc *ProvisionUseCase) exportGenesisFromSnapshot(ctx context.Context, input
 	uc.logger.Info("Exporting genesis from snapshot state...")
 	exportOpts := ports.StateExportOptions{
 		HomeDir:           exportDir,
-		BinaryPath:        input.BinaryPath,
+		BinaryPath:        binaryPath,
+		DockerImage:       dockerImage,
+		BinaryName:        binaryName,
+		DockerHomeDir:     dockerHomeDir,
 		RpcGenesis:        rpcGenesis,
 		ExportOpts:        uc.stateExportSvc.DefaultExportOptions(),
 		Network:           input.Network, // Keep for backward compatibility
