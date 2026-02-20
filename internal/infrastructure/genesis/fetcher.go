@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -247,10 +248,16 @@ func (f *FetcherAdapter) fetchGenesisDirect(ctx context.Context, rpcEndpoint str
 
 type genesisChunkResponse struct {
 	Result struct {
-		Chunk int    `json:"chunk"`
-		Total int    `json:"total"`
-		Data  string `json:"data"`
+		Chunk json.RawMessage `json:"chunk"`
+		Total json.RawMessage `json:"total"`
+		Data  string          `json:"data"`
 	} `json:"result"`
+}
+
+type genesisChunk struct {
+	Chunk int
+	Total int
+	Data  string
 }
 
 func (f *FetcherAdapter) fetchGenesisChunked(ctx context.Context, rpcEndpoint string) ([]byte, error) {
@@ -259,31 +266,31 @@ func (f *FetcherAdapter) fetchGenesisChunked(ctx context.Context, rpcEndpoint st
 	if err != nil {
 		return nil, err
 	}
-	if first.Result.Total <= 0 {
-		return nil, fmt.Errorf("invalid genesis_chunked total: %d", first.Result.Total)
+	if first.Total <= 0 {
+		return nil, fmt.Errorf("invalid genesis_chunked total: %d", first.Total)
 	}
 
-	decodedFirst, err := base64.StdEncoding.DecodeString(first.Result.Data)
+	decodedFirst, err := base64.StdEncoding.DecodeString(first.Data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode chunk 0: %w", err)
 	}
 
-	combined := make([]byte, 0, len(decodedFirst)*first.Result.Total)
+	combined := make([]byte, 0, len(decodedFirst)*first.Total)
 	combined = append(combined, decodedFirst...)
 
-	for chunk := 1; chunk < first.Result.Total; chunk++ {
+	for chunk := 1; chunk < first.Total; chunk++ {
 		resp, err := f.fetchGenesisChunk(ctx, rpcEndpoint, chunk)
 		if err != nil {
 			return nil, err
 		}
-		if resp.Result.Total != first.Result.Total {
-			return nil, fmt.Errorf("chunk %d total mismatch: got %d, expected %d", chunk, resp.Result.Total, first.Result.Total)
+		if resp.Total != first.Total {
+			return nil, fmt.Errorf("chunk %d total mismatch: got %d, expected %d", chunk, resp.Total, first.Total)
 		}
-		if resp.Result.Chunk != chunk {
-			return nil, fmt.Errorf("chunk index mismatch: got %d, expected %d", resp.Result.Chunk, chunk)
+		if resp.Chunk != chunk {
+			return nil, fmt.Errorf("chunk index mismatch: got %d, expected %d", resp.Chunk, chunk)
 		}
 
-		decoded, err := base64.StdEncoding.DecodeString(resp.Result.Data)
+		decoded, err := base64.StdEncoding.DecodeString(resp.Data)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode chunk %d: %w", chunk, err)
 		}
@@ -304,7 +311,7 @@ func (f *FetcherAdapter) fetchGenesisChunked(ctx context.Context, rpcEndpoint st
 	return combined, nil
 }
 
-func (f *FetcherAdapter) fetchGenesisChunk(ctx context.Context, rpcEndpoint string, chunk int) (*genesisChunkResponse, error) {
+func (f *FetcherAdapter) fetchGenesisChunk(ctx context.Context, rpcEndpoint string, chunk int) (*genesisChunk, error) {
 	chunkURL := fmt.Sprintf("%s/genesis_chunked?chunk=%d", strings.TrimSuffix(rpcEndpoint, "/"), chunk)
 	f.logger.Debug("Fetching genesis chunk %d from %s", chunk, chunkURL)
 
@@ -321,7 +328,47 @@ func (f *FetcherAdapter) fetchGenesisChunk(ctx context.Context, rpcEndpoint stri
 		return nil, fmt.Errorf("genesis_chunked response is empty for chunk %d", chunk)
 	}
 
-	return &resp, nil
+	parsedChunk, err := parseChunkedIndex(resp.Result.Chunk, "chunk")
+	if err != nil {
+		return nil, fmt.Errorf("invalid genesis_chunked chunk field: %w", err)
+	}
+	parsedTotal, err := parseChunkedIndex(resp.Result.Total, "total")
+	if err != nil {
+		return nil, fmt.Errorf("invalid genesis_chunked total field: %w", err)
+	}
+
+	return &genesisChunk{
+		Chunk: parsedChunk,
+		Total: parsedTotal,
+		Data:  resp.Result.Data,
+	}, nil
+}
+
+func parseChunkedIndex(raw json.RawMessage, field string) (int, error) {
+	if len(raw) == 0 {
+		return 0, fmt.Errorf("%s is missing", field)
+	}
+
+	var intValue int
+	if err := json.Unmarshal(raw, &intValue); err == nil {
+		return intValue, nil
+	}
+
+	var stringValue string
+	if err := json.Unmarshal(raw, &stringValue); err != nil {
+		return 0, fmt.Errorf("%s is neither integer nor string", field)
+	}
+
+	stringValue = strings.TrimSpace(stringValue)
+	if stringValue == "" {
+		return 0, fmt.Errorf("%s is empty", field)
+	}
+
+	parsedValue, err := strconv.Atoi(stringValue)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not numeric: %w", field, err)
+	}
+	return parsedValue, nil
 }
 
 func (f *FetcherAdapter) fetchRPCBody(ctx context.Context, url string) ([]byte, error) {
