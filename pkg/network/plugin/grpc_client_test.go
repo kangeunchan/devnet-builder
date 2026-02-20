@@ -2,9 +2,11 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/altuslabsxyz/devnet-builder/pkg/network"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -14,6 +16,8 @@ import (
 type mockNetworkModuleClient struct {
 	NetworkModuleClient
 	getGovernanceParamsFn func(ctx context.Context, in *GovernanceParamsRequest, opts ...grpc.CallOption) (*GovernanceParamsResponse, error)
+	modifyGenesisFn       func(ctx context.Context, in *ModifyGenesisRequest, opts ...grpc.CallOption) (*BytesResponse, error)
+	modifyGenesisFileFn   func(ctx context.Context, in *ModifyGenesisFileRequest, opts ...grpc.CallOption) (*ModifyGenesisFileResponse, error)
 }
 
 func (m *mockNetworkModuleClient) GetGovernanceParams(ctx context.Context, in *GovernanceParamsRequest, opts ...grpc.CallOption) (*GovernanceParamsResponse, error) {
@@ -21,6 +25,20 @@ func (m *mockNetworkModuleClient) GetGovernanceParams(ctx context.Context, in *G
 		return m.getGovernanceParamsFn(ctx, in, opts...)
 	}
 	return nil, status.Errorf(codes.Unimplemented, "method GetGovernanceParams not implemented")
+}
+
+func (m *mockNetworkModuleClient) ModifyGenesis(ctx context.Context, in *ModifyGenesisRequest, opts ...grpc.CallOption) (*BytesResponse, error) {
+	if m.modifyGenesisFn != nil {
+		return m.modifyGenesisFn(ctx, in, opts...)
+	}
+	return nil, status.Errorf(codes.Unimplemented, "method ModifyGenesis not implemented")
+}
+
+func (m *mockNetworkModuleClient) ModifyGenesisFile(ctx context.Context, in *ModifyGenesisFileRequest, opts ...grpc.CallOption) (*ModifyGenesisFileResponse, error) {
+	if m.modifyGenesisFileFn != nil {
+		return m.modifyGenesisFileFn(ctx, in, opts...)
+	}
+	return nil, status.Errorf(codes.Unimplemented, "method ModifyGenesisFile not implemented")
 }
 
 // TestGRPCClient_GetGovernanceParams_Success tests successful parameter query.
@@ -211,4 +229,70 @@ func TestGRPCClient_TxBuilderFactory(t *testing.T) {
 	// fail to compile if the interface is broken.
 	client := &GRPCClient{}
 	_ = client // Use to prevent unused variable warning
+}
+
+func TestGRPCClient_ModifyGenesis_MapsAddAccounts(t *testing.T) {
+	mockClient := &mockNetworkModuleClient{
+		modifyGenesisFn: func(ctx context.Context, in *ModifyGenesisRequest, opts ...grpc.CallOption) (*BytesResponse, error) {
+			if len(in.AddAccounts) != 1 {
+				t.Fatalf("expected 1 add_account, got %d", len(in.AddAccounts))
+			}
+			account := in.AddAccounts[0]
+			if account.Name != "account0" {
+				t.Fatalf("unexpected account name: %q", account.Name)
+			}
+			if account.Address != "cosmos1abc" {
+				t.Fatalf("unexpected account address: %q", account.Address)
+			}
+			if account.Balance != "2500000uatom" {
+				t.Fatalf("unexpected account balance: %q", account.Balance)
+			}
+			return &BytesResponse{Data: []byte(`{}`)}, nil
+		},
+	}
+
+	client := &GRPCClient{client: mockClient}
+	_, err := client.ModifyGenesis([]byte(`{"chain_id":"x"}`), network.GenesisOptions{
+		ChainID: "cosmosdevnet-1",
+		Validators: []network.ValidatorInfo{
+			{Moniker: "validator0"},
+		},
+		AddAccounts: []network.GenesisAccountInfo{
+			{Name: "account0", Address: "cosmos1abc", Balance: "2500000uatom"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ModifyGenesis returned error: %v", err)
+	}
+}
+
+func TestGRPCClient_ModifyGenesisFile_MapsAddAccounts(t *testing.T) {
+	mockClient := &mockNetworkModuleClient{
+		modifyGenesisFileFn: func(ctx context.Context, in *ModifyGenesisFileRequest, opts ...grpc.CallOption) (*ModifyGenesisFileResponse, error) {
+			if in.InputPath != "/tmp/in.json" || in.OutputPath != "/tmp/out.json" {
+				return nil, errors.New("unexpected file paths")
+			}
+			if len(in.AddAccounts) != 1 {
+				t.Fatalf("expected 1 add_account, got %d", len(in.AddAccounts))
+			}
+			account := in.AddAccounts[0]
+			if account.Address != "cosmos1abc" {
+				t.Fatalf("unexpected account address: %q", account.Address)
+			}
+			return &ModifyGenesisFileResponse{OutputSize: 42}, nil
+		},
+	}
+
+	client := &GRPCClient{client: mockClient}
+	size, err := client.ModifyGenesisFile("/tmp/in.json", "/tmp/out.json", network.GenesisOptions{
+		AddAccounts: []network.GenesisAccountInfo{
+			{Name: "account0", Address: "cosmos1abc", Balance: "2500000uatom"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ModifyGenesisFile returned error: %v", err)
+	}
+	if size != 42 {
+		t.Fatalf("unexpected output size: %d", size)
+	}
 }
