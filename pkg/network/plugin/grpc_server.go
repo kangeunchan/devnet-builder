@@ -216,21 +216,11 @@ func (s *GRPCServer) ProcessPattern(ctx context.Context, req *Empty) (*StringRes
 
 // Operation methods
 func (s *GRPCServer) ModifyGenesis(ctx context.Context, req *ModifyGenesisRequest) (*BytesResponse, error) {
-	// Convert validators from protobuf to network types
-	validators := make([]network.ValidatorInfo, len(req.Validators))
-	for i, v := range req.Validators {
-		validators[i] = network.ValidatorInfo{
-			Moniker:         v.Moniker,
-			ConsPubKey:      v.ConsPubKey,
-			OperatorAddress: v.OperatorAddress,
-			SelfDelegation:  v.SelfDelegation,
-		}
-	}
-
 	opts := network.GenesisOptions{
 		ChainID:       req.ChainId,
 		NumValidators: int(req.NumValidators),
-		Validators:    validators,
+		Validators:    fromProtoValidators(req.Validators),
+		AddAccounts:   fromProtoGenesisAccounts(req.AddAccounts),
 	}
 	result, err := s.impl.ModifyGenesis(req.Genesis, opts)
 	if err != nil {
@@ -319,21 +309,11 @@ func (s *GRPCServer) GetConfigOverrides(ctx context.Context, req *NodeConfigRequ
 // ModifyGenesisFile handles file-based genesis modification.
 // This method avoids gRPC message size limits by using file paths.
 func (s *GRPCServer) ModifyGenesisFile(ctx context.Context, req *ModifyGenesisFileRequest) (*ModifyGenesisFileResponse, error) {
-	// Convert validators from protobuf to network types
-	validators := make([]network.ValidatorInfo, len(req.Validators))
-	for i, v := range req.Validators {
-		validators[i] = network.ValidatorInfo{
-			Moniker:         v.Moniker,
-			ConsPubKey:      v.ConsPubKey,
-			OperatorAddress: v.OperatorAddress,
-			SelfDelegation:  v.SelfDelegation,
-		}
-	}
-
 	opts := network.GenesisOptions{
 		ChainID:       req.ChainId,
 		NumValidators: int(req.NumValidators),
-		Validators:    validators,
+		Validators:    fromProtoValidators(req.Validators),
+		AddAccounts:   fromProtoGenesisAccounts(req.AddAccounts),
 	}
 
 	// Check if the implementation supports file-based modification
@@ -362,6 +342,31 @@ func (s *GRPCServer) ModifyGenesisFile(ctx context.Context, req *ModifyGenesisFi
 	}
 
 	return &ModifyGenesisFileResponse{OutputSize: int64(len(modifiedGenesis))}, nil
+}
+
+func fromProtoValidators(validators []*ValidatorInfo) []network.ValidatorInfo {
+	out := make([]network.ValidatorInfo, len(validators))
+	for i, v := range validators {
+		out[i] = network.ValidatorInfo{
+			Moniker:         v.Moniker,
+			ConsPubKey:      v.ConsPubKey,
+			OperatorAddress: v.OperatorAddress,
+			SelfDelegation:  v.SelfDelegation,
+		}
+	}
+	return out
+}
+
+func fromProtoGenesisAccounts(accounts []*AccountInfo) []network.GenesisAccountInfo {
+	out := make([]network.GenesisAccountInfo, len(accounts))
+	for i, account := range accounts {
+		out[i] = network.GenesisAccountInfo{
+			Name:    account.Name,
+			Address: account.Address,
+			Balance: account.Balance,
+		}
+	}
+	return out
 }
 
 // GetGovernanceParams retrieves governance parameters from the blockchain via the plugin.

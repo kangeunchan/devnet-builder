@@ -294,22 +294,15 @@ func (c *GRPCClient) ExportCommand(homeDir string) []string {
 // Operation methods
 
 func (c *GRPCClient) ModifyGenesis(genesis []byte, opts network.GenesisOptions) ([]byte, error) {
-	// Convert validators to protobuf format
-	validators := make([]*ValidatorInfo, len(opts.Validators))
-	for i, v := range opts.Validators {
-		validators[i] = &ValidatorInfo{
-			Moniker:         v.Moniker,
-			ConsPubKey:      v.ConsPubKey,
-			OperatorAddress: v.OperatorAddress,
-			SelfDelegation:  v.SelfDelegation,
-		}
-	}
+	validators := toProtoValidators(opts.Validators)
+	accounts := toProtoGenesisAccounts(opts.AddAccounts)
 
 	resp, err := c.client.ModifyGenesis(context.Background(), &ModifyGenesisRequest{
 		Genesis:       genesis,
 		ChainId:       opts.ChainID,
 		NumValidators: int32(opts.NumValidators),
 		Validators:    validators,
+		AddAccounts:   accounts,
 	})
 	if err != nil {
 		return nil, err
@@ -422,16 +415,8 @@ var _ network.FileBasedGenesisModifier = (*GRPCClient)(nil)
 // ModifyGenesisFile implements network.FileBasedGenesisModifier.
 // This method uses file paths instead of raw bytes to avoid gRPC message size limits.
 func (c *GRPCClient) ModifyGenesisFile(inputPath, outputPath string, opts network.GenesisOptions) (int64, error) {
-	// Convert validators to protobuf format
-	validators := make([]*ValidatorInfo, len(opts.Validators))
-	for i, v := range opts.Validators {
-		validators[i] = &ValidatorInfo{
-			Moniker:         v.Moniker,
-			ConsPubKey:      v.ConsPubKey,
-			OperatorAddress: v.OperatorAddress,
-			SelfDelegation:  v.SelfDelegation,
-		}
-	}
+	validators := toProtoValidators(opts.Validators)
+	accounts := toProtoGenesisAccounts(opts.AddAccounts)
 
 	resp, err := c.client.ModifyGenesisFile(context.Background(), &ModifyGenesisFileRequest{
 		InputPath:     inputPath,
@@ -439,6 +424,7 @@ func (c *GRPCClient) ModifyGenesisFile(inputPath, outputPath string, opts networ
 		ChainId:       opts.ChainID,
 		NumValidators: int32(opts.NumValidators),
 		Validators:    validators,
+		AddAccounts:   accounts,
 	})
 	if err != nil {
 		return 0, err
@@ -447,6 +433,31 @@ func (c *GRPCClient) ModifyGenesisFile(inputPath, outputPath string, opts networ
 		return 0, errors.New(resp.Error)
 	}
 	return resp.OutputSize, nil
+}
+
+func toProtoValidators(validators []network.ValidatorInfo) []*ValidatorInfo {
+	out := make([]*ValidatorInfo, len(validators))
+	for i, v := range validators {
+		out[i] = &ValidatorInfo{
+			Moniker:         v.Moniker,
+			ConsPubKey:      v.ConsPubKey,
+			OperatorAddress: v.OperatorAddress,
+			SelfDelegation:  v.SelfDelegation,
+		}
+	}
+	return out
+}
+
+func toProtoGenesisAccounts(accounts []network.GenesisAccountInfo) []*AccountInfo {
+	out := make([]*AccountInfo, len(accounts))
+	for i, account := range accounts {
+		out[i] = &AccountInfo{
+			Name:    account.Name,
+			Address: account.Address,
+			Balance: account.Balance,
+		}
+	}
+	return out
 }
 
 // GetGovernanceParams retrieves governance parameters from the plugin.
