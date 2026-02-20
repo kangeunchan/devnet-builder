@@ -2,13 +2,8 @@ package cosmos
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -283,101 +278,6 @@ func (n *CosmosNetwork) GetAppVersion(ctx context.Context, rpcEndpoint string) (
 	return &plugin.AppVersionResponse{Version: result.Result.Response.Version}, nil
 }
 
-func (n *CosmosNetwork) resolveRPCEndpoint(raw, networkType string) string {
-	endpoint := strings.TrimSpace(raw)
-	if endpoint == "" {
-		if networkType == "testnet" {
-			return testnetRPC
-		}
-		return mainnetRPC
-	}
-
-	endpoint = normalizeEndpoint(endpoint)
-
-	if strings.Contains(endpoint, "cosmos-api.polkachu.com") {
-		return strings.Replace(endpoint, "cosmos-api.polkachu.com", "cosmos-rpc.polkachu.com", 1)
-	}
-	if strings.Contains(endpoint, "cosmos-testnet-api.polkachu.com") {
-		return strings.Replace(endpoint, "cosmos-testnet-api.polkachu.com", "cosmos-testnet-rpc.polkachu.com", 1)
-	}
-
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return endpoint
-	}
-	host, port, err := net.SplitHostPort(u.Host)
-	if err == nil {
-		if port == "1317" {
-			u.Host = net.JoinHostPort(host, "26657")
-		}
-		return strings.TrimRight(u.String(), "/")
-	}
-
-	if isLocalHost(u.Host) {
-		u.Host = net.JoinHostPort(u.Host, "26657")
-	}
-
-	return strings.TrimRight(u.String(), "/")
-}
-
-func (n *CosmosNetwork) resolveRESTEndpoint(raw, networkType string) string {
-	endpoint := strings.TrimSpace(raw)
-	if endpoint == "" {
-		if networkType == "testnet" {
-			return testnetREST
-		}
-		return mainnetREST
-	}
-
-	endpoint = normalizeEndpoint(endpoint)
-
-	if strings.Contains(endpoint, "cosmos-rpc.polkachu.com") {
-		return strings.Replace(endpoint, "cosmos-rpc.polkachu.com", "cosmos-api.polkachu.com", 1)
-	}
-	if strings.Contains(endpoint, "cosmos-testnet-rpc.polkachu.com") {
-		return strings.Replace(endpoint, "cosmos-testnet-rpc.polkachu.com", "cosmos-testnet-api.polkachu.com", 1)
-	}
-
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return endpoint
-	}
-	host, port, err := net.SplitHostPort(u.Host)
-	if err == nil {
-		if port == "26657" {
-			u.Host = net.JoinHostPort(host, "1317")
-		}
-		return strings.TrimRight(u.String(), "/")
-	}
-
-	if isLocalHost(u.Host) {
-		u.Host = net.JoinHostPort(u.Host, "1317")
-	}
-
-	return strings.TrimRight(u.String(), "/")
-}
-
-func normalizeEndpoint(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return raw
-	}
-	if !strings.Contains(raw, "://") {
-		raw = "http://" + raw
-	}
-	return strings.TrimRight(raw, "/")
-}
-
-func isLocalHost(host string) bool {
-	h := host
-	if strings.Contains(h, ":") {
-		if parsedHost, _, err := net.SplitHostPort(h); err == nil {
-			h = parsedHost
-		}
-	}
-	return h == "localhost" || h == "127.0.0.1"
-}
-
 func (n *CosmosNetwork) getBlockTimestamp(ctx context.Context, rpcEndpoint string, height int64) (time.Time, error) {
 	rpc := n.resolveRPCEndpoint(rpcEndpoint, "")
 
@@ -405,34 +305,4 @@ func (n *CosmosNetwork) getBlockTimestamp(ctx context.Context, rpcEndpoint strin
 	}
 
 	return time.Time{}, fmt.Errorf("failed to parse block time %q", resp.Result.Block.Header.Time)
-}
-
-func getJSON(ctx context.Context, endpoint string, out interface{}) error {
-	ctx = ensureContext(ctx)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return err
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		body, _ := io.ReadAll(resp.Body)
-		if len(body) > 0 {
-			return fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-		}
-		return fmt.Errorf("http %d", resp.StatusCode)
-	}
-
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(out); err != nil {
-		return err
-	}
-
-	return nil
 }
