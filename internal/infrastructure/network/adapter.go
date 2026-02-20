@@ -2,13 +2,18 @@
 package network
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
 	"cosmossdk.io/log"
 	"cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pkgNetwork "github.com/altuslabsxyz/devnet-builder/pkg/network"
+	pb "github.com/altuslabsxyz/devnet-builder/pkg/network/plugin"
 )
 
 // PluginAdapter adapts pkg/network.Module to internal/network.NetworkModule.
@@ -193,21 +198,9 @@ func (a *PluginAdapter) KeyringDir(homeDir string, backend string) string {
 // ============================================
 
 func (a *PluginAdapter) ModifyGenesis(genesis []byte, opts GenesisOptions) ([]byte, error) {
-	// Convert validators from internal to pkg types
-	validators := make([]pkgNetwork.ValidatorInfo, len(opts.Validators))
-	for i, v := range opts.Validators {
-		validators[i] = pkgNetwork.ValidatorInfo{
-			Moniker:         v.Moniker,
-			ConsPubKey:      v.ConsPubKey,
-			OperatorAddress: v.OperatorAddress,
-			SelfDelegation:  v.SelfDelegation,
-		}
-	}
-
-	pkgOpts := pkgNetwork.GenesisOptions{
-		ChainID:       opts.ChainID,
-		NumValidators: opts.NumValidators,
-		Validators:    validators,
+	pkgOpts, err := ToPkgGenesisOptions(opts)
+	if err != nil {
+		return nil, fmt.Errorf("invalid genesis options: %w", err)
 	}
 	return a.module.ModifyGenesis(genesis, pkgOpts)
 }
@@ -221,24 +214,101 @@ func (a *PluginAdapter) ModifyGenesisFile(inputPath, outputPath string, opts Gen
 		return 0, fmt.Errorf("plugin does not support file-based genesis modification")
 	}
 
-	// Convert validators from internal to pkg types
-	validators := make([]pkgNetwork.ValidatorInfo, len(opts.Validators))
-	for i, v := range opts.Validators {
-		validators[i] = pkgNetwork.ValidatorInfo{
-			Moniker:         v.Moniker,
-			ConsPubKey:      v.ConsPubKey,
-			OperatorAddress: v.OperatorAddress,
-			SelfDelegation:  v.SelfDelegation,
-		}
-	}
-
-	pkgOpts := pkgNetwork.GenesisOptions{
-		ChainID:       opts.ChainID,
-		NumValidators: opts.NumValidators,
-		Validators:    validators,
+	pkgOpts, err := ToPkgGenesisOptions(opts)
+	if err != nil {
+		return 0, fmt.Errorf("invalid genesis options: %w", err)
 	}
 
 	return fileModifier.ModifyGenesisFile(inputPath, outputPath, pkgOpts)
+}
+
+// ============================================
+// RPC delegation
+// ============================================
+
+func (a *PluginAdapter) GetGovernanceParams(rpcEndpoint, networkType string) (*pb.GovernanceParamsResponse, error) {
+	type governanceProvider interface {
+		GetGovernanceParams(rpcEndpoint, networkType string) (*pb.GovernanceParamsResponse, error)
+	}
+
+	if provider, ok := a.module.(governanceProvider); ok {
+		return provider.GetGovernanceParams(rpcEndpoint, networkType)
+	}
+	return nil, status.Errorf(codes.Unimplemented, "method GetGovernanceParams not implemented")
+}
+
+func (a *PluginAdapter) GetBlockHeight(ctx context.Context, rpcEndpoint string) (*pb.BlockHeightResponse, error) {
+	return a.delegateRPCGetBlockHeight(ctx, rpcEndpoint)
+}
+
+func (a *PluginAdapter) GetBlockTime(ctx context.Context, rpcEndpoint string, sampleSize int) (*pb.BlockTimeResponse, error) {
+	type provider interface {
+		GetBlockTime(ctx context.Context, rpcEndpoint string, sampleSize int) (*pb.BlockTimeResponse, error)
+	}
+	if rpcProvider, ok := a.module.(provider); ok {
+		return rpcProvider.GetBlockTime(ctx, rpcEndpoint, sampleSize)
+	}
+	return nil, status.Errorf(codes.Unimplemented, "method GetBlockTime not implemented")
+}
+
+func (a *PluginAdapter) IsChainRunning(ctx context.Context, rpcEndpoint string) (*pb.ChainStatusResponse, error) {
+	type provider interface {
+		IsChainRunning(ctx context.Context, rpcEndpoint string) (*pb.ChainStatusResponse, error)
+	}
+	if rpcProvider, ok := a.module.(provider); ok {
+		return rpcProvider.IsChainRunning(ctx, rpcEndpoint)
+	}
+	return nil, status.Errorf(codes.Unimplemented, "method IsChainRunning not implemented")
+}
+
+func (a *PluginAdapter) WaitForBlock(ctx context.Context, rpcEndpoint string, targetHeight int64, timeoutMs int64) (*pb.WaitForBlockResponse, error) {
+	type provider interface {
+		WaitForBlock(ctx context.Context, rpcEndpoint string, targetHeight int64, timeoutMs int64) (*pb.WaitForBlockResponse, error)
+	}
+	if rpcProvider, ok := a.module.(provider); ok {
+		return rpcProvider.WaitForBlock(ctx, rpcEndpoint, targetHeight, timeoutMs)
+	}
+	return nil, status.Errorf(codes.Unimplemented, "method WaitForBlock not implemented")
+}
+
+func (a *PluginAdapter) GetProposal(ctx context.Context, rpcEndpoint string, proposalID uint64) (*pb.ProposalResponse, error) {
+	type provider interface {
+		GetProposal(ctx context.Context, rpcEndpoint string, proposalID uint64) (*pb.ProposalResponse, error)
+	}
+	if rpcProvider, ok := a.module.(provider); ok {
+		return rpcProvider.GetProposal(ctx, rpcEndpoint, proposalID)
+	}
+	return nil, status.Errorf(codes.Unimplemented, "method GetProposal not implemented")
+}
+
+func (a *PluginAdapter) GetUpgradePlan(ctx context.Context, rpcEndpoint string) (*pb.UpgradePlanResponse, error) {
+	type provider interface {
+		GetUpgradePlan(ctx context.Context, rpcEndpoint string) (*pb.UpgradePlanResponse, error)
+	}
+	if rpcProvider, ok := a.module.(provider); ok {
+		return rpcProvider.GetUpgradePlan(ctx, rpcEndpoint)
+	}
+	return nil, status.Errorf(codes.Unimplemented, "method GetUpgradePlan not implemented")
+}
+
+func (a *PluginAdapter) GetAppVersion(ctx context.Context, rpcEndpoint string) (*pb.AppVersionResponse, error) {
+	type provider interface {
+		GetAppVersion(ctx context.Context, rpcEndpoint string) (*pb.AppVersionResponse, error)
+	}
+	if rpcProvider, ok := a.module.(provider); ok {
+		return rpcProvider.GetAppVersion(ctx, rpcEndpoint)
+	}
+	return nil, status.Errorf(codes.Unimplemented, "method GetAppVersion not implemented")
+}
+
+func (a *PluginAdapter) delegateRPCGetBlockHeight(ctx context.Context, rpcEndpoint string) (*pb.BlockHeightResponse, error) {
+	type provider interface {
+		GetBlockHeight(ctx context.Context, rpcEndpoint string) (*pb.BlockHeightResponse, error)
+	}
+	if rpcProvider, ok := a.module.(provider); ok {
+		return rpcProvider.GetBlockHeight(ctx, rpcEndpoint)
+	}
+	return nil, status.Errorf(codes.Unimplemented, "method GetBlockHeight not implemented")
 }
 
 // ============================================
@@ -300,15 +370,69 @@ func (a *PluginAdapter) Validate() error {
 // ============================================
 
 func (a *PluginAdapter) SnapshotURL(networkType string) string {
-	return a.module.SnapshotURL(networkType)
+	urls := a.SnapshotURLs(networkType)
+	if len(urls) == 0 {
+		return ""
+	}
+	return urls[0]
+}
+
+func (a *PluginAdapter) SnapshotURLs(networkType string) []string {
+	type provider interface {
+		SnapshotURLs(networkType string) []string
+	}
+
+	if p, ok := a.module.(provider); ok {
+		return uniqueNonEmptyStrings(p.SnapshotURLs(networkType))
+	}
+	return uniqueNonEmptyStrings([]string{a.module.SnapshotURL(networkType)})
 }
 
 func (a *PluginAdapter) RPCEndpoint(networkType string) string {
-	return a.module.RPCEndpoint(networkType)
+	endpoints := a.RPCEndpoints(networkType)
+	if len(endpoints) == 0 {
+		return ""
+	}
+	return endpoints[0]
+}
+
+func (a *PluginAdapter) RPCEndpoints(networkType string) []string {
+	type provider interface {
+		RPCEndpoints(networkType string) []string
+	}
+
+	if p, ok := a.module.(provider); ok {
+		return uniqueNonEmptyStrings(p.RPCEndpoints(networkType))
+	}
+	return uniqueNonEmptyStrings([]string{a.module.RPCEndpoint(networkType)})
 }
 
 func (a *PluginAdapter) AvailableNetworks() []string {
 	return a.module.AvailableNetworks()
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // ============================================
