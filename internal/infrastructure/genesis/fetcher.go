@@ -3,6 +3,7 @@ package genesis
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -196,9 +197,14 @@ func (f *FetcherAdapter) FetchFromRPC(ctx context.Context, endpoint string) ([]b
 
 // fetchGenesisFromRPC fetches genesis from an RPC endpoint and saves to destPath.
 func (f *FetcherAdapter) fetchGenesisFromRPC(ctx context.Context, rpcEndpoint, destPath string) error {
-	genesis, err := f.fetchGenesisDirect(ctx, rpcEndpoint)
-	if err != nil {
-		return err
+	genesis, directErr := f.fetchGenesisDirect(ctx, rpcEndpoint)
+	if directErr != nil {
+		f.logger.Debug("Direct /genesis fetch failed (%v), trying /genesis_chunked fallback", directErr)
+		chunkedGenesis, chunkedErr := f.fetchGenesisChunked(ctx, rpcEndpoint)
+		if chunkedErr != nil {
+			return fmt.Errorf("direct /genesis failed: %w; /genesis_chunked fallback failed: %v", directErr, chunkedErr)
+		}
+		genesis = chunkedGenesis
 	}
 
 	// Ensure directory exists
@@ -237,6 +243,85 @@ func (f *FetcherAdapter) fetchGenesisDirect(ctx context.Context, rpcEndpoint str
 		return nil, fmt.Errorf("genesis response is empty")
 	}
 	return rpcResponse.Result.Genesis, nil
+}
+
+type genesisChunkResponse struct {
+	Result struct {
+		Chunk int    `json:"chunk"`
+		Total int    `json:"total"`
+		Data  string `json:"data"`
+	} `json:"result"`
+}
+
+func (f *FetcherAdapter) fetchGenesisChunked(ctx context.Context, rpcEndpoint string) ([]byte, error) {
+	// Fetch chunk 0 first to determine total count.
+	first, err := f.fetchGenesisChunk(ctx, rpcEndpoint, 0)
+	if err != nil {
+		return nil, err
+	}
+	if first.Result.Total <= 0 {
+		return nil, fmt.Errorf("invalid genesis_chunked total: %d", first.Result.Total)
+	}
+
+	decodedFirst, err := base64.StdEncoding.DecodeString(first.Result.Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode chunk 0: %w", err)
+	}
+
+	combined := make([]byte, 0, len(decodedFirst)*first.Result.Total)
+	combined = append(combined, decodedFirst...)
+
+	for chunk := 1; chunk < first.Result.Total; chunk++ {
+		resp, err := f.fetchGenesisChunk(ctx, rpcEndpoint, chunk)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Result.Total != first.Result.Total {
+			return nil, fmt.Errorf("chunk %d total mismatch: got %d, expected %d", chunk, resp.Result.Total, first.Result.Total)
+		}
+		if resp.Result.Chunk != chunk {
+			return nil, fmt.Errorf("chunk index mismatch: got %d, expected %d", resp.Result.Chunk, chunk)
+		}
+
+		decoded, err := base64.StdEncoding.DecodeString(resp.Result.Data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode chunk %d: %w", chunk, err)
+		}
+		combined = append(combined, decoded...)
+	}
+
+	// Validate assembled genesis is valid JSON and appears to be a genesis object.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(combined, &probe); err != nil {
+		return nil, fmt.Errorf("combined genesis_chunked payload is not valid JSON: %w", err)
+	}
+	if _, hasChainID := probe["chain_id"]; !hasChainID {
+		if _, hasAppState := probe["app_state"]; !hasAppState {
+			return nil, fmt.Errorf("combined genesis_chunked payload missing chain_id/app_state")
+		}
+	}
+
+	return combined, nil
+}
+
+func (f *FetcherAdapter) fetchGenesisChunk(ctx context.Context, rpcEndpoint string, chunk int) (*genesisChunkResponse, error) {
+	chunkURL := fmt.Sprintf("%s/genesis_chunked?chunk=%d", strings.TrimSuffix(rpcEndpoint, "/"), chunk)
+	f.logger.Debug("Fetching genesis chunk %d from %s", chunk, chunkURL)
+
+	body, err := f.fetchRPCBody(ctx, chunkURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp genesisChunkResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse genesis_chunked response: %w", err)
+	}
+	if strings.TrimSpace(resp.Result.Data) == "" {
+		return nil, fmt.Errorf("genesis_chunked response is empty for chunk %d", chunk)
+	}
+
+	return &resp, nil
 }
 
 func (f *FetcherAdapter) fetchRPCBody(ctx context.Context, url string) ([]byte, error) {
