@@ -318,8 +318,15 @@ type GenesisValidatorInfo struct {
 
 // GenesisAccount represents an account to add to genesis.
 type GenesisAccount struct {
+	// Name is an optional account label
+	Name string
+
 	// Address is the bech32 account address
 	Address string
+
+	// Balance is the original coins string (e.g. "1000000uatom,5000000stake")
+	// kept for lossless adapter handoff to plugin contracts.
+	Balance string
 
 	// Coins are the initial balances
 	Coins []Coin
