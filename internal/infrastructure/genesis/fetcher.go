@@ -3,10 +3,13 @@ package genesis
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +22,12 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/output"
 )
 
+const (
+	genesisRPCRequestTimeout = 5 * time.Minute
+	genesisRPCMaxAttempts    = 3
+	genesisRPCRetryDelay     = 400 * time.Millisecond
+)
+
 // FetcherAdapter implements ports.GenesisFetcher.
 type FetcherAdapter struct {
 	homeDir     string
@@ -27,6 +36,28 @@ type FetcherAdapter struct {
 	useDocker   bool
 	logger      *output.Logger
 }
+
+var (
+	genesisRPCHTTPClient = &http.Client{
+		Timeout: genesisRPCRequestTimeout,
+	}
+	genesisRPCHTTP1Client = &http.Client{
+		Timeout: genesisRPCRequestTimeout,
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     false,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		},
+	}
+)
 
 // NewFetcherAdapter creates a new FetcherAdapter.
 func NewFetcherAdapter(homeDir, binaryPath, dockerImage string, useDocker bool, logger *output.Logger) *FetcherAdapter {
@@ -371,11 +402,58 @@ func parseChunkedIndex(raw json.RawMessage, field string) (int, error) {
 	return parsedValue, nil
 }
 
+type rpcStatusError struct {
+	URL    string
+	Status int
+}
+
+func (e *rpcStatusError) Error() string {
+	return fmt.Sprintf("failed to fetch genesis: status %d", e.Status)
+}
+
 func (f *FetcherAdapter) fetchRPCBody(ctx context.Context, url string) ([]byte, error) {
-	client := &http.Client{
-		Timeout: 5 * time.Minute,
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
+	var lastErr error
+	for attempt := 1; attempt <= genesisRPCMaxAttempts; attempt++ {
+		client := genesisRPCHTTPClient
+		if attempt > 1 {
+			client = genesisRPCHTTP1Client
+		}
+
+		body, err := f.fetchRPCBodyOnce(ctx, url, client)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+
+		if !isRetryableGenesisFetchError(err) || attempt == genesisRPCMaxAttempts {
+			return nil, err
+		}
+
+		if f.logger != nil {
+			f.logger.Debug(
+				"Retrying genesis fetch (%d/%d) for %s after error: %v",
+				attempt+1,
+				genesisRPCMaxAttempts,
+				url,
+				err,
+			)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(genesisRPCRetryDelay):
+		}
+	}
+
+	return nil, lastErr
+}
+
+func (f *FetcherAdapter) fetchRPCBodyOnce(ctx context.Context, url string, client *http.Client) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -388,7 +466,10 @@ func (f *FetcherAdapter) fetchRPCBody(ctx context.Context, url string) ([]byte, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch genesis: status %d", resp.StatusCode)
+		return nil, &rpcStatusError{
+			URL:    url,
+			Status: resp.StatusCode,
+		}
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -397,6 +478,40 @@ func (f *FetcherAdapter) fetchRPCBody(ctx context.Context, url string) ([]byte, 
 	}
 
 	return body, nil
+}
+
+func isRetryableGenesisFetchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var statusErr *rpcStatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.Status {
+		case http.StatusTooManyRequests, http.StatusRequestTimeout:
+			return true
+		default:
+			return statusErr.Status >= http.StatusInternalServerError
+		}
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "stream error") ||
+		strings.Contains(msg, "http2") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "unexpected eof") {
+		return true
+	}
+
+	return false
 }
 
 // ModifyGenesis applies modifications to a genesis file.
