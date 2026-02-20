@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/output"
@@ -91,5 +92,72 @@ func TestDownloadFile_RestartWhenRangeNotSupported(t *testing.T) {
 	}
 	if string(got) != string(fullData) {
 		t.Fatalf("downloaded data mismatch: got=%d want=%d", len(got), len(fullData))
+	}
+}
+
+func TestDownloadFile_ParallelRangeDownload(t *testing.T) {
+	t.Setenv("DEVNET_SNAPSHOT_PARALLEL", "4")
+
+	fullData := []byte(strings.Repeat("parallel-download-data-", 1024*4)) // ~92 MiB
+	var rangeReqCount atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", strconv.Itoa(len(fullData)))
+			w.WriteHeader(http.StatusOK)
+			return
+		case http.MethodGet:
+			rangeHeader := r.Header.Get("Range")
+			if rangeHeader == "" {
+				w.Header().Set("Content-Length", strconv.Itoa(len(fullData)))
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(fullData)
+				return
+			}
+
+			var start, end int
+			if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); err != nil {
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			if start < 0 || end >= len(fullData) || start > end {
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+
+			rangeReqCount.Add(1)
+			chunk := fullData[start : end+1]
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", strconv.Itoa(len(chunk)))
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(fullData)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(chunk)
+			return
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	destPath := filepath.Join(t.TempDir(), "snapshot.tar.lz4")
+
+	logger := output.NewLogger()
+	logger.SetNoColor(true)
+
+	if err := downloadFile(context.Background(), server.URL, destPath, logger, nil); err != nil {
+		t.Fatalf("downloadFile failed: %v", err)
+	}
+
+	got, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatalf("read final file: %v", err)
+	}
+	if string(got) != string(fullData) {
+		t.Fatalf("downloaded data mismatch: got=%d want=%d", len(got), len(fullData))
+	}
+	if rangeReqCount.Load() < 2 {
+		t.Fatalf("expected multiple range requests, got %d", rangeReqCount.Load())
 	}
 }

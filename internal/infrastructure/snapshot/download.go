@@ -9,7 +9,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
@@ -25,6 +28,10 @@ const (
 
 	// DownloadTimeout is the maximum time allowed for a download.
 	DownloadTimeout = 30 * time.Minute
+
+	// DefaultParallelConnections is the default number of parallel HTTP range
+	// requests used for large snapshot downloads when the server supports it.
+	DefaultParallelConnections = 4
 )
 
 // DownloadOptions configures the download behavior.
@@ -138,6 +145,25 @@ func downloadFile(ctx context.Context, url, destPath string, logger *output.Logg
 
 	if logger != nil {
 		logger.StopSpinner()
+	}
+
+	parallelConnections := resolveParallelConnections()
+	if resumeOffset == 0 && parallelConnections > 1 {
+		if _, usedParallel, parallelErr := tryParallelDownload(ctx, client, url, tmpPath, parallelConnections, logger, progress); usedParallel {
+			if parallelErr == nil {
+				if err := os.Rename(tmpPath, destPath); err != nil {
+					os.Remove(tmpPath)
+					return fmt.Errorf("failed to rename file: %w", err)
+				}
+				return nil
+			}
+			if logger != nil {
+				logger.Warn("Parallel download unavailable, falling back to single connection: %v", parallelErr)
+			}
+			if removeErr := os.Remove(tmpPath); removeErr != nil && !os.IsNotExist(removeErr) {
+				return fmt.Errorf("failed to clean temporary file after parallel attempt: %w", removeErr)
+			}
+		}
 	}
 
 	// Create request with context
@@ -318,6 +344,266 @@ func partialFileSize(path string) (int64, error) {
 		return 0, err
 	}
 	return info.Size(), nil
+}
+
+type probeResult struct {
+	size         int64
+	rangeSupport bool
+}
+
+func tryParallelDownload(
+	ctx context.Context,
+	client *http.Client,
+	url string,
+	tmpPath string,
+	connections int,
+	logger *output.Logger,
+	progress ports.ProgressReporter,
+) (int64, bool, error) {
+	probe, err := probeRemoteSnapshot(ctx, client, url)
+	if err != nil {
+		return 0, false, nil
+	}
+	if !probe.rangeSupport || probe.size <= 0 {
+		return 0, false, nil
+	}
+
+	if connections < 2 {
+		return 0, false, nil
+	}
+	if int64(connections) > probe.size {
+		connections = int(probe.size)
+		if connections < 2 {
+			return 0, false, nil
+		}
+	}
+
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return 0, true, fmt.Errorf("failed to create temporary file: %w", err)
+	}
+	defer file.Close()
+
+	if err := file.Truncate(probe.size); err != nil {
+		return 0, true, fmt.Errorf("failed to preallocate temporary file: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var downloadedBytes atomic.Int64
+	startedAt := time.Now()
+
+	stopProgress := make(chan struct{})
+	progressDone := make(chan struct{})
+	go reportParallelProgress(stopProgress, progressDone, logger, progress, &downloadedBytes, probe.size, startedAt)
+
+	chunkSize := (probe.size + int64(connections) - 1) / int64(connections)
+	errCh := make(chan error, connections)
+	var wg sync.WaitGroup
+
+	for i := 0; i < connections; i++ {
+		start := int64(i) * chunkSize
+		if start >= probe.size {
+			break
+		}
+
+		end := start + chunkSize - 1
+		if end >= probe.size {
+			end = probe.size - 1
+		}
+
+		wg.Add(1)
+		go func(rangeStart, rangeEnd int64) {
+			defer wg.Done()
+			if err := downloadRangeChunk(ctx, client, url, file, rangeStart, rangeEnd, &downloadedBytes); err != nil {
+				errCh <- err
+				cancel()
+			}
+		}(start, end)
+	}
+
+	wg.Wait()
+	close(stopProgress)
+	<-progressDone
+
+	close(errCh)
+	for chunkErr := range errCh {
+		if chunkErr != nil {
+			return downloadedBytes.Load(), true, chunkErr
+		}
+	}
+
+	if downloadedBytes.Load() != probe.size {
+		return downloadedBytes.Load(), true, fmt.Errorf("incomplete parallel download: got %d bytes, expected %d bytes", downloadedBytes.Load(), probe.size)
+	}
+
+	return downloadedBytes.Load(), true, nil
+}
+
+func probeRemoteSnapshot(ctx context.Context, client *http.Client, url string) (probeResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return probeResult{}, err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return probeResult{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return probeResult{}, fmt.Errorf("probe failed with status %d", resp.StatusCode)
+	}
+
+	size := resp.ContentLength
+	rangeSupport := strings.Contains(strings.ToLower(strings.TrimSpace(resp.Header.Get("Accept-Ranges"))), "bytes")
+	return probeResult{size: size, rangeSupport: rangeSupport}, nil
+}
+
+func downloadRangeChunk(
+	ctx context.Context,
+	client *http.Client,
+	url string,
+	file *os.File,
+	start int64,
+	end int64,
+	downloaded *atomic.Int64,
+) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create range request %d-%d: %w", start, end, err)
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("range request %d-%d failed: %w", start, end, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPartialContent {
+		return fmt.Errorf("range request %d-%d returned status %d", start, end, resp.StatusCode)
+	}
+
+	buf := make([]byte, 256*1024)
+	offset := start
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			written, writeErr := file.WriteAt(buf[:n], offset)
+			if writeErr != nil {
+				return fmt.Errorf("failed writing range %d-%d: %w", start, end, writeErr)
+			}
+			if written != n {
+				return fmt.Errorf("short write for range %d-%d", start, end)
+			}
+			offset += int64(n)
+			downloaded.Add(int64(n))
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("range read failed for %d-%d: %w", start, end, readErr)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+
+	expectedBytes := end - start + 1
+	if got := offset - start; got != expectedBytes {
+		return fmt.Errorf("range %d-%d incomplete: got %d bytes, expected %d", start, end, got, expectedBytes)
+	}
+
+	return nil
+}
+
+func reportParallelProgress(
+	stop <-chan struct{},
+	done chan<- struct{},
+	logger *output.Logger,
+	progress ports.ProgressReporter,
+	downloaded *atomic.Int64,
+	total int64,
+	startedAt time.Time,
+) {
+	defer close(done)
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			current := downloaded.Load()
+			speed := calcAverageSpeed(current, startedAt)
+			if logger != nil {
+				logger.Progress(current, total, speed)
+				logger.ProgressComplete()
+			}
+			if progress != nil {
+				progress.ReportStep(ports.StepProgress{
+					Name:    "Downloading snapshot",
+					Status:  "running",
+					Current: current,
+					Total:   total,
+					Unit:    "bytes",
+					Speed:   speed,
+				})
+			}
+			return
+		case <-ticker.C:
+			current := downloaded.Load()
+			speed := calcAverageSpeed(current, startedAt)
+			if logger != nil {
+				logger.Progress(current, total, speed)
+			}
+			if progress != nil {
+				progress.ReportStep(ports.StepProgress{
+					Name:    "Downloading snapshot",
+					Status:  "running",
+					Current: current,
+					Total:   total,
+					Unit:    "bytes",
+					Speed:   speed,
+				})
+			}
+		}
+	}
+}
+
+func calcAverageSpeed(downloaded int64, startedAt time.Time) float64 {
+	elapsed := time.Since(startedAt).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(downloaded) / elapsed
+}
+
+func resolveParallelConnections() int {
+	raw := strings.TrimSpace(os.Getenv("DEVNET_SNAPSHOT_PARALLEL"))
+	if raw == "" {
+		return DefaultParallelConnections
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return DefaultParallelConnections
+	}
+	if value < 1 {
+		return 1
+	}
+	if value > 16 {
+		return 16
+	}
+	return value
 }
 
 // DetectDecompressor determines the decompressor and extension from URL.
