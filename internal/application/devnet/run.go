@@ -128,6 +128,9 @@ func (uc *RunUseCase) buildStartCommand(node *ports.NodeMetadata, metadata *port
 		binary = uc.networkModule.BinaryName()
 	}
 	if binary == "" {
+		binary = metadata.BinaryName
+	}
+	if binary == "" {
 		binary = "stabled" // fallback
 	}
 
