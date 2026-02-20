@@ -13,8 +13,9 @@ BUILDDIR ?= $(CURDIR)/build
 BINARY_NAME = devnet-builder
 
 # Version information
-# Try to get version from git tags, fallback to commit hash if no tags exist
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "v0.0.0-dev")
+# Use the latest semver-like git tag when available.
+# If no matching tag exists, use a semver-safe development version.
+VERSION ?= $(shell git describe --tags --dirty --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo "v0.1.0-dev")
 GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 

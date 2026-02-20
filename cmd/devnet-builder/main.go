@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/fatih/color"
+	"github.com/hashicorp/go-version"
 
 	"github.com/altuslabsxyz/devnet-builder/cmd/devnet-builder/commands"
 	"github.com/altuslabsxyz/devnet-builder/internal"
 	"github.com/altuslabsxyz/devnet-builder/internal/di"
+	domainversion "github.com/altuslabsxyz/devnet-builder/internal/domain/version"
 	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/network"
 	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/version/migrations"
 	"github.com/altuslabsxyz/devnet-builder/internal/output"
@@ -18,6 +21,8 @@ import (
 
 // Global plugin loader - shared across the application
 var globalLoader *plugin.Loader
+
+const defaultMigrationTargetVersion = "1.0.0"
 
 func main() {
 	// Enable color output
@@ -114,18 +119,98 @@ func checkAndMigrateVersion(homeDir string) error {
 	migrationSvc := factory.CreateMigrationService()
 
 	// Register all migrations
-	migrationSvc.RegisterMigration(migrations.NewCacheKeyMigration())
-	migrationSvc.RegisterMigration(migrations.NewNoOpMigration())
-	migrationSvc.RegisterMigration(migrations.NewV001ToV100Migration())
-	migrationSvc.RegisterMigration(migrations.NewV010ToV100Migration())
-	migrationSvc.RegisterMigration(migrations.NewV010DevToV100Migration())
+	registered := []domainversion.Migration{
+		migrations.NewCacheKeyMigration(),
+		migrations.NewNoOpMigration(),
+		migrations.NewV001ToV100Migration(),
+		migrations.NewV010ToV100Migration(),
+		migrations.NewV010DevToV100Migration(),
+	}
+	for _, m := range registered {
+		migrationSvc.RegisterMigration(m)
+	}
+
+	targetVersion := resolveMigrationTargetVersion(internal.Version, registered, logger)
 
 	// Check and migrate to current version
 	ctx := context.Background()
-	_, err := migrationSvc.CheckAndMigrate(ctx, homeDir, internal.Version)
+	_, err := migrationSvc.CheckAndMigrate(ctx, homeDir, targetVersion)
 	if err != nil {
-		return fmt.Errorf("failed to migrate to version %s: %w", internal.Version, err)
+		return fmt.Errorf("failed to migrate to version %s (build version %s): %w", targetVersion, internal.Version, err)
 	}
 
 	return nil
+}
+
+func resolveMigrationTargetVersion(buildVersion string, registered []domainversion.Migration, logger *output.Logger) string {
+	versionString := strings.TrimSpace(buildVersion)
+	if versionString == "" {
+		if logger != nil {
+			logger.Warn("Build version is empty; using migration target %s", defaultMigrationTargetVersion)
+		}
+		return defaultMigrationTargetVersion
+	}
+
+	if isSemverVersion(versionString) {
+		return versionString
+	}
+
+	fallback := latestMigrationTargetVersion(registered)
+	if fallback == "" {
+		fallback = defaultMigrationTargetVersion
+	}
+
+	if logger != nil {
+		logger.Warn("Build version %q is not semver-compatible; using migration target %q", versionString, fallback)
+	}
+
+	return fallback
+}
+
+func isSemverVersion(v string) bool {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
+		return false
+	}
+
+	core := strings.TrimPrefix(trimmed, "v")
+	if strings.Count(core, ".") < 2 {
+		return false
+	}
+
+	if _, err := version.NewSemver(trimmed); err == nil {
+		return true
+	}
+
+	if !strings.HasPrefix(trimmed, "v") {
+		if _, err := version.NewSemver("v" + trimmed); err == nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+func latestMigrationTargetVersion(registered []domainversion.Migration) string {
+	var latestParsed *version.Version
+	latestRaw := ""
+
+	for _, m := range registered {
+		candidate := strings.TrimSpace(m.ToVersion())
+		if candidate == "" {
+			continue
+		}
+
+		parsed, err := version.NewSemver(candidate)
+		if err != nil {
+			continue
+		}
+
+		if latestParsed == nil || latestParsed.LessThan(parsed) {
+			latestParsed = parsed
+			latestRaw = candidate
+		}
+	}
+
+	return latestRaw
 }
