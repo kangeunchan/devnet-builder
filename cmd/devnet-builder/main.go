@@ -55,7 +55,7 @@ func main() {
 	// Register loaded plugins with the network registry
 	for _, p := range plugins {
 		// Create an adapter to convert pkg/network.Module to internal/network.NetworkModule
-		adapter := newPluginAdapter(p.Module())
+		adapter := network.NewPluginAdapter(p.Module())
 		if err := network.MustRegister(adapter, false); err != nil {
 			output.DefaultLogger.Warn("Failed to register plugin %q: %v", p.Name(), err)
 		}
