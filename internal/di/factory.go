@@ -3,6 +3,7 @@ package di
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	appversion "github.com/altuslabsxyz/devnet-builder/internal/application/version"
@@ -99,7 +100,11 @@ func (f *InfrastructureFactory) CreateDockerExecutor() ports.DockerExecutor {
 
 // CreateRPCClient creates an RPCClient for the given host and port.
 func (f *InfrastructureFactory) CreateRPCClient(host string, port int) ports.RPCClient {
-	return infrarpc.NewCosmosRPCClient(host, port)
+	client := infrarpc.NewCosmosRPCClient(host, port)
+	if pluginModule, ok := f.module.(infrarpc.NetworkPluginModule); ok {
+		return client.WithPlugin(pluginModule, "devnet")
+	}
+	return client
 }
 
 // CreateBinaryCache creates a BinaryCache implementation.
@@ -147,17 +152,28 @@ func (f *InfrastructureFactory) CreateNodeInitializer() ports.NodeInitializer {
 	mode := types.ExecutionModeLocal
 	dockerImage := ""
 	binaryPath := ""
+	binaryName := ""
+	dockerHomeDir := ""
 
 	if f.dockerMode {
 		mode = types.ExecutionModeDocker
 	}
 	if f.module != nil {
 		dockerImage = f.module.DockerImage()
-		binaryPath = f.homeDir + "/bin/" + f.module.BinaryName()
+		binaryName = f.module.BinaryName()
+		dockerHomeDir = f.module.DockerHomeDir()
+		binaryPath = f.homeDir + "/bin/" + binaryName
 	}
 
 	return &nodeInitializerAdapter{
-		inner: infranodeconfig.NewNodeInitializerWithBinary(mode, dockerImage, binaryPath, f.logger),
+		inner: infranodeconfig.NewNodeInitializerWithConfig(infranodeconfig.NodeInitializerConfig{
+			Mode:          mode,
+			DockerImage:   dockerImage,
+			BinaryPath:    binaryPath,
+			BinaryName:    binaryName,
+			DockerHomeDir: dockerHomeDir,
+			Logger:        f.logger,
+		}),
 	}
 }
 
@@ -199,6 +215,13 @@ func (f *InfrastructureFactory) CreateNodeManagerFactory() *infranode.NodeManage
 	config := infranode.FactoryConfig{
 		Mode:   mode,
 		Logger: f.logger,
+	}
+	if f.module != nil {
+		binaryName := f.module.BinaryName()
+		config.BinaryPath = f.homeDir + "/bin/" + binaryName
+		config.DockerImage = f.module.DockerImage()
+		config.DockerBinaryName = binaryName
+		config.DockerHomeDir = f.module.DockerHomeDir()
 	}
 	return infranode.NewNodeManagerFactory(config)
 }
@@ -261,6 +284,9 @@ type healthCheckerAdapter struct {
 func (h *healthCheckerAdapter) CheckNode(ctx context.Context, rpcEndpoint string) (*ports.HealthStatus, error) {
 	// Parse endpoint to get host and port (simplified - assumes http://host:port format)
 	client := infrarpc.NewCosmosRPCClientWithURL(rpcEndpoint)
+	if pluginModule, ok := h.factory.module.(infrarpc.NetworkPluginModule); ok {
+		client = client.WithPlugin(pluginModule, "devnet")
+	}
 
 	height, err := client.GetBlockHeight(ctx)
 	if err != nil {
@@ -474,34 +500,73 @@ func (a *networkModuleAdapter) DefaultPorts() ports.PortConfig {
 }
 
 func (a *networkModuleAdapter) SnapshotURL(networkType string) string {
-	return a.module.SnapshotURL(networkType)
+	urls := a.SnapshotURLs(networkType)
+	if len(urls) == 0 {
+		return ""
+	}
+	return urls[0]
+}
+
+func (a *networkModuleAdapter) SnapshotURLs(networkType string) []string {
+	type provider interface {
+		SnapshotURLs(networkType string) []string
+	}
+	if p, ok := a.module.(provider); ok {
+		return compactUniqueStrings(p.SnapshotURLs(networkType))
+	}
+	return compactUniqueStrings([]string{a.module.SnapshotURL(networkType)})
 }
 
 func (a *networkModuleAdapter) RPCEndpoint(networkType string) string {
-	return a.module.RPCEndpoint(networkType)
+	endpoints := a.RPCEndpoints(networkType)
+	if len(endpoints) == 0 {
+		return ""
+	}
+	return endpoints[0]
+}
+
+func (a *networkModuleAdapter) RPCEndpoints(networkType string) []string {
+	type provider interface {
+		RPCEndpoints(networkType string) []string
+	}
+	if p, ok := a.module.(provider); ok {
+		return compactUniqueStrings(p.RPCEndpoints(networkType))
+	}
+	return compactUniqueStrings([]string{a.module.RPCEndpoint(networkType)})
 }
 
 func (a *networkModuleAdapter) AvailableNetworks() []string {
 	return a.module.AvailableNetworks()
 }
 
-func (a *networkModuleAdapter) ModifyGenesis(genesis []byte, opts ports.GenesisModifyOptions) ([]byte, error) {
-	// Convert ports.ValidatorInfo to network.GenesisValidatorInfo
-	validators := make([]network.GenesisValidatorInfo, len(opts.AddValidators))
-	for i, v := range opts.AddValidators {
-		validators[i] = network.GenesisValidatorInfo{
-			Moniker:         v.Moniker,
-			ConsPubKey:      v.ConsPubKey,
-			OperatorAddress: v.OperatorAddress,
-			SelfDelegation:  v.SelfDelegation,
-		}
+func compactUniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
 	}
 
-	// Convert ports.GenesisModifyOptions to network.GenesisOptions
-	networkOpts := network.GenesisOptions{
-		ChainID:       opts.ChainID,
-		NumValidators: opts.NumValidators,
-		Validators:    validators,
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (a *networkModuleAdapter) ModifyGenesis(genesis []byte, opts ports.GenesisModifyOptions) ([]byte, error) {
+	networkOpts, err := toNetworkGenesisOptions(opts)
+	if err != nil {
+		return nil, err
 	}
 	return a.module.ModifyGenesis(genesis, networkOpts)
 }
@@ -515,25 +580,40 @@ func (a *networkModuleAdapter) ModifyGenesisFile(inputPath, outputPath string, o
 		return 0, fmt.Errorf("network module does not support file-based genesis modification")
 	}
 
-	// Convert ports.ValidatorInfo to network.GenesisValidatorInfo
-	validators := make([]network.GenesisValidatorInfo, len(opts.AddValidators))
-	for i, v := range opts.AddValidators {
-		validators[i] = network.GenesisValidatorInfo{
-			Moniker:         v.Moniker,
-			ConsPubKey:      v.ConsPubKey,
-			OperatorAddress: v.OperatorAddress,
-			SelfDelegation:  v.SelfDelegation,
-		}
-	}
-
-	// Convert ports.GenesisModifyOptions to network.GenesisOptions
-	networkOpts := network.GenesisOptions{
-		ChainID:       opts.ChainID,
-		NumValidators: opts.NumValidators,
-		Validators:    validators,
+	networkOpts, err := toNetworkGenesisOptions(opts)
+	if err != nil {
+		return 0, err
 	}
 
 	return fileModifier.ModifyGenesisFile(inputPath, outputPath, networkOpts)
+}
+
+func toNetworkGenesisOptions(opts ports.GenesisModifyOptions) (network.GenesisOptions, error) {
+	validators := make([]network.GenesisValidatorInfo, len(opts.AddValidators))
+	for i, validator := range opts.AddValidators {
+		validators[i] = network.GenesisValidatorInfo{
+			Moniker:         validator.Moniker,
+			ConsPubKey:      validator.ConsPubKey,
+			OperatorAddress: validator.OperatorAddress,
+			SelfDelegation:  validator.SelfDelegation,
+		}
+	}
+
+	accounts := make([]network.GenesisAccount, len(opts.AddAccounts))
+	for i, account := range opts.AddAccounts {
+		accounts[i] = network.GenesisAccount{
+			Name:    account.Name,
+			Address: account.Address,
+			Balance: account.Balance,
+		}
+	}
+
+	return network.GenesisOptions{
+		ChainID:       opts.ChainID,
+		NumValidators: opts.NumValidators,
+		Validators:    validators,
+		Accounts:      accounts,
+	}, nil
 }
 
 func (a *networkModuleAdapter) GenesisConfig() ports.GenesisConfig {
