@@ -4,6 +4,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
@@ -122,6 +123,17 @@ type DockerNodeManager struct {
 	genesisPath string
 }
 
+// DockerNodeManagerConfig controls DockerNodeManager runtime wiring.
+type DockerNodeManagerConfig struct {
+	Node        *Node
+	Image       string
+	EVMChainID  string
+	GenesisPath string
+	BinaryName  string
+	HomeDir     string
+	Logger      *output.Logger
+}
+
 // NewDockerNodeManager creates a new DockerNodeManager.
 func NewDockerNodeManager(
 	node *Node,
@@ -130,15 +142,44 @@ func NewDockerNodeManager(
 	genesisPath string,
 	logger *output.Logger,
 ) *DockerNodeManager {
+	binaryName := ""
+	if node != nil {
+		binaryName = node.BinaryName
+	}
+
+	return NewDockerNodeManagerWithConfig(DockerNodeManagerConfig{
+		Node:        node,
+		Image:       image,
+		EVMChainID:  evmChainID,
+		GenesisPath: genesisPath,
+		BinaryName:  binaryName,
+		Logger:      logger,
+	})
+}
+
+// NewDockerNodeManagerWithConfig creates a DockerNodeManager with explicit runtime configuration.
+func NewDockerNodeManagerWithConfig(cfg DockerNodeManagerConfig) *DockerNodeManager {
+	logger := cfg.Logger
 	if logger == nil {
 		logger = output.DefaultLogger
 	}
 
+	binaryName := strings.TrimSpace(cfg.BinaryName)
+	if binaryName == "" && cfg.Node != nil {
+		binaryName = strings.TrimSpace(cfg.Node.BinaryName)
+	}
+
 	return &DockerNodeManager{
-		node:        node,
-		manager:     NewDockerManagerWithEVMChainID(image, evmChainID, logger),
+		node: cfg.Node,
+		manager: NewDockerManagerWithConfig(DockerManagerConfig{
+			Image:      cfg.Image,
+			BinaryName: binaryName,
+			HomeDir:    strings.TrimSpace(cfg.HomeDir),
+			EVMChainID: cfg.EVMChainID,
+			Logger:     logger,
+		}),
 		logger:      logger,
-		genesisPath: genesisPath,
+		genesisPath: cfg.GenesisPath,
 	}
 }
 

@@ -222,10 +222,12 @@ func TestNodeManagerFactory_IsDocker(t *testing.T) {
 
 func TestDockerManager_CreatedWithCorrectConfig(t *testing.T) {
 	tests := []struct {
-		name      string
-		config    FactoryConfig
-		wantImage string
-		wantEVMID string
+		name           string
+		config         FactoryConfig
+		wantImage      string
+		wantEVMID      string
+		wantBinaryName string
+		wantHomeDir    string
 	}{
 		{
 			name: "default image when empty",
@@ -233,8 +235,10 @@ func TestDockerManager_CreatedWithCorrectConfig(t *testing.T) {
 				Mode:        types.ExecutionModeDocker,
 				DockerImage: "",
 			},
-			wantImage: DefaultDockerImage,
-			wantEVMID: "",
+			wantImage:      DefaultDockerImage,
+			wantEVMID:      "",
+			wantBinaryName: "",
+			wantHomeDir:    DefaultDockerHomeDir,
 		},
 		{
 			name: "custom image",
@@ -242,8 +246,10 @@ func TestDockerManager_CreatedWithCorrectConfig(t *testing.T) {
 				Mode:        types.ExecutionModeDocker,
 				DockerImage: "my/image:v2",
 			},
-			wantImage: "my/image:v2",
-			wantEVMID: "",
+			wantImage:      "my/image:v2",
+			wantEVMID:      "",
+			wantBinaryName: "",
+			wantHomeDir:    DefaultDockerHomeDir,
 		},
 		{
 			name: "with EVM chain ID",
@@ -252,8 +258,23 @@ func TestDockerManager_CreatedWithCorrectConfig(t *testing.T) {
 				DockerImage: "stablelabs/stabled:1.1.3",
 				EVMChainID:  "988",
 			},
-			wantImage: "stablelabs/stabled:1.1.3",
-			wantEVMID: "988",
+			wantImage:      "stablelabs/stabled:1.1.3",
+			wantEVMID:      "988",
+			wantBinaryName: "",
+			wantHomeDir:    DefaultDockerHomeDir,
+		},
+		{
+			name: "with explicit binary and home",
+			config: FactoryConfig{
+				Mode:             types.ExecutionModeDocker,
+				DockerImage:      "example/chaind:v1",
+				DockerBinaryName: "chaind",
+				DockerHomeDir:    "/home/chaind",
+			},
+			wantImage:      "example/chaind:v1",
+			wantEVMID:      "",
+			wantBinaryName: "chaind",
+			wantHomeDir:    "/home/chaind",
 		},
 	}
 
@@ -275,6 +296,12 @@ func TestDockerManager_CreatedWithCorrectConfig(t *testing.T) {
 			}
 			if dm.EVMChainID != tt.wantEVMID {
 				t.Errorf("DockerManager.EVMChainID = %q, want %q", dm.EVMChainID, tt.wantEVMID)
+			}
+			if dm.BinaryName != tt.wantBinaryName {
+				t.Errorf("DockerManager.BinaryName = %q, want %q", dm.BinaryName, tt.wantBinaryName)
+			}
+			if dm.HomeDir != tt.wantHomeDir {
+				t.Errorf("DockerManager.HomeDir = %q, want %q", dm.HomeDir, tt.wantHomeDir)
 			}
 		})
 	}

@@ -20,6 +20,14 @@ type FactoryConfig struct {
 	// If empty, defaults to DefaultDockerImage.
 	DockerImage string
 
+	// DockerBinaryName is the binary command inside Docker containers.
+	// If empty, DockerManager falls back to configured heuristics.
+	DockerBinaryName string
+
+	// DockerHomeDir is the home directory path inside Docker containers.
+	// If empty, defaults to DefaultDockerHomeDir.
+	DockerHomeDir string
+
 	// EVMChainID is the EVM chain ID (optional, used for --evm.evm-chain-id flag).
 	EVMChainID string
 
@@ -75,10 +83,13 @@ func (f *NodeManagerFactory) Create() (NodeManager, error) {
 
 // createDockerManager creates a DockerManager with the factory's configuration.
 func (f *NodeManagerFactory) createDockerManager(logger *output.Logger) NodeManager {
-	if f.config.EVMChainID != "" {
-		return NewDockerManagerWithEVMChainID(f.config.DockerImage, f.config.EVMChainID, logger)
-	}
-	return NewDockerManager(f.config.DockerImage, logger)
+	return NewDockerManagerWithConfig(DockerManagerConfig{
+		Image:      f.config.DockerImage,
+		BinaryName: f.config.DockerBinaryName,
+		HomeDir:    f.config.DockerHomeDir,
+		EVMChainID: f.config.EVMChainID,
+		Logger:     logger,
+	})
 }
 
 // createLocalManager creates a LocalManager with the factory's configuration.
