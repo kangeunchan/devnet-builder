@@ -9,10 +9,10 @@ const (
 	mainnetChainID = "cosmoshub-4"
 	testnetChainID = "provider"
 
-	mainnetRPC              = "https://cosmos-rpc.polkachu.com"
-	mainnetREST             = "https://cosmos-api.polkachu.com"
-	testnetRPC              = "https://cosmos-testnet-rpc.polkachu.com"
-	testnetREST             = "https://cosmos-testnet-api.polkachu.com"
+	mainnetRPC  = "https://cosmoshub.rpc.kjnodes.com"
+	mainnetREST = "https://cosmoshub.api.kjnodes.com"
+	testnetRPC  = "https://cosmoshub-testnet.rpc.kjnodes.com"
+	testnetREST = "https://cosmoshub-testnet.api.kjnodes.com"
 	mainnetSnapshotIndexURL = "https://www.polkachu.com/tendermint_snapshots/cosmos"
 	testnetSnapshotIndexURL = "https://www.polkachu.com/testnets/cosmos/snapshots"
 
