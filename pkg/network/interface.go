@@ -309,11 +309,19 @@ type ValidatorInfo struct {
 	SelfDelegation  string `json:"self_delegation"`  // Amount of tokens delegated
 }
 
+// GenesisAccountInfo represents account information for genesis funding.
+type GenesisAccountInfo struct {
+	Name    string `json:"name,omitempty"`
+	Address string `json:"address"`
+	Balance string `json:"balance,omitempty"` // Coins string (e.g. "1000000uatom")
+}
+
 // GenesisOptions contains user-provided overrides for genesis modification.
 type GenesisOptions struct {
 	ChainID       string          `json:"chain_id,omitempty"`
 	NumValidators int             `json:"num_validators,omitempty"`
 	Validators    []ValidatorInfo `json:"validators,omitempty"`
+	AddAccounts   []GenesisAccountInfo `json:"add_accounts,omitempty"`
 }
 
 // GeneratorConfig contains configuration for devnet generation.
