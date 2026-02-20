@@ -49,7 +49,7 @@ func TestDownloadFile_ResumeFromPartialFile(t *testing.T) {
 	logger := output.NewLogger()
 	logger.SetNoColor(true)
 
-	if err := downloadFile(context.Background(), server.URL, destPath, logger, nil); err != nil {
+	if err := downloadFile(context.Background(), server.URL, destPath, logger, nil, 0); err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
 	}
 
@@ -82,7 +82,7 @@ func TestDownloadFile_RestartWhenRangeNotSupported(t *testing.T) {
 	logger := output.NewLogger()
 	logger.SetNoColor(true)
 
-	if err := downloadFile(context.Background(), server.URL, destPath, logger, nil); err != nil {
+	if err := downloadFile(context.Background(), server.URL, destPath, logger, nil, 0); err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
 	}
 
@@ -146,7 +146,7 @@ func TestDownloadFile_ParallelRangeDownload(t *testing.T) {
 	logger := output.NewLogger()
 	logger.SetNoColor(true)
 
-	if err := downloadFile(context.Background(), server.URL, destPath, logger, nil); err != nil {
+	if err := downloadFile(context.Background(), server.URL, destPath, logger, nil, 0); err != nil {
 		t.Fatalf("downloadFile failed: %v", err)
 	}
 
@@ -159,5 +159,93 @@ func TestDownloadFile_ParallelRangeDownload(t *testing.T) {
 	}
 	if rangeReqCount.Load() < 2 {
 		t.Fatalf("expected multiple range requests, got %d", rangeReqCount.Load())
+	}
+}
+
+func TestProbeRemoteSnapshot_FallbackToRange(t *testing.T) {
+	fullData := []byte(strings.Repeat("probe-fallback-", 1024))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case http.MethodGet:
+			if r.Header.Get("Range") == "bytes=0-0" {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-0/%d", len(fullData)))
+				w.Header().Set("Content-Length", "1")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(fullData[:1])
+				return
+			}
+			w.WriteHeader(http.StatusBadRequest)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	probe, err := probeRemoteSnapshot(context.Background(), sharedDownloadHTTPClient, server.URL)
+	if err != nil {
+		t.Fatalf("probeRemoteSnapshot failed: %v", err)
+	}
+	if !probe.rangeSupport {
+		t.Fatalf("expected rangeSupport=true")
+	}
+	if probe.size != int64(len(fullData)) {
+		t.Fatalf("unexpected size: got=%d want=%d", probe.size, len(fullData))
+	}
+}
+
+func TestResolveParallelConnections_OptionPrecedence(t *testing.T) {
+	t.Setenv("DEVNET_SNAPSHOT_PARALLEL", "9")
+
+	if got := resolveParallelConnections(3); got != 3 {
+		t.Fatalf("expected option value to win, got %d", got)
+	}
+	if got := resolveParallelConnections(0); got != 9 {
+		t.Fatalf("expected env value, got %d", got)
+	}
+}
+
+func TestResolveDownloadPath_RequiresDestinationWithoutCacheKey(t *testing.T) {
+	archive := DetectSnapshotArchive("https://example.com/snapshot.tar.lz4")
+	_, err := resolveDownloadPath(DownloadOptions{
+		DestPath: "",
+		CacheKey: "",
+		HomeDir:  t.TempDir(),
+	}, archive)
+	if err == nil {
+		t.Fatalf("expected resolveDownloadPath to fail when both dest path and cache key are empty")
+	}
+}
+
+func TestDetectSnapshotArchive(t *testing.T) {
+	tests := []struct {
+		name         string
+		url          string
+		decompressor string
+		extension    string
+	}{
+		{name: "zstd", url: "https://example.com/file.tar.zst", decompressor: "zstd", extension: ".tar.zst"},
+		{name: "lz4", url: "https://example.com/file.tar.lz4", decompressor: "lz4", extension: ".tar.lz4"},
+		{name: "gzip", url: "https://example.com/file.tgz", decompressor: "gzip", extension: ".tar.gz"},
+		{name: "tar", url: "https://example.com/file.tar", decompressor: "none", extension: ".tar"},
+		{name: "default", url: "https://example.com/file.unknown", decompressor: "zstd", extension: ".tar.zst"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := DetectSnapshotArchive(tc.url)
+			if got.Decompressor != tc.decompressor {
+				t.Fatalf("unexpected decompressor: got=%q want=%q", got.Decompressor, tc.decompressor)
+			}
+			if got.Extension != tc.extension {
+				t.Fatalf("unexpected extension: got=%q want=%q", got.Extension, tc.extension)
+			}
+			if !got.IsTarArchive {
+				t.Fatalf("expected IsTarArchive=true")
+			}
+		})
 	}
 }
