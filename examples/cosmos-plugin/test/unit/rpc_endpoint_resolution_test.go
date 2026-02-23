@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/internal/plugin"
+	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/plugin"
 )
 
 func TestRPCEndpoint_UnsupportedNetworkReturnsEmpty(t *testing.T) {
