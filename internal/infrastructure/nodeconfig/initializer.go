@@ -172,6 +172,7 @@ func (i *NodeInitializer) initDocker(ctx context.Context, nodeDir, moniker, chai
 	args = append(args, "init", moniker,
 		"--chain-id", chainID,
 		"--home", containerHome,
+		"--overwrite",
 	)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
