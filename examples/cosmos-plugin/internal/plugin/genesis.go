@@ -13,7 +13,7 @@ import (
 // ModifyGenesis applies genesis mutations through the same streaming pipeline used
 // by ModifyGenesisFile to keep behavior identical across both code paths.
 func (n *CosmosNetwork) ModifyGenesis(genesis []byte, opts network.GenesisOptions) ([]byte, error) {
-	if err := validateGenesisOptions(opts); err != nil {
+	if err := n.validateGenesisOptions(opts); err != nil {
 		return nil, err
 	}
 
@@ -38,7 +38,7 @@ func (n *CosmosNetwork) ModifyGenesis(genesis []byte, opts network.GenesisOption
 // ModifyGenesisFile handles large genesis files using file paths.
 // It avoids keeping both raw input bytes and output bytes in memory simultaneously.
 func (n *CosmosNetwork) ModifyGenesisFile(inputPath, outputPath string, opts network.GenesisOptions) (int64, error) {
-	if err := validateGenesisOptions(opts); err != nil {
+	if err := n.validateGenesisOptions(opts); err != nil {
 		return 0, err
 	}
 
