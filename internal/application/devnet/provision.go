@@ -936,9 +936,10 @@ func (uc *ProvisionUseCase) modifyGenesisViaFile(ctx context.Context, genesis []
 		ctx,
 		uc.logger,
 		"Patching genesis",
-		outputPath,
 		int64(len(genesis)),
 		time.Second,
+		outputPath+".tmp",
+		outputPath,
 	)
 	defer stopProgress()
 

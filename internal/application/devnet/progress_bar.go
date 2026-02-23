@@ -107,8 +107,11 @@ func printByteProgress(logger ports.Logger, label string, current, total int64, 
 	}
 }
 
-func streamFileProgress(ctx context.Context, logger ports.Logger, label, path string, estimatedTotal int64, interval time.Duration) func() {
+func streamFileProgress(ctx context.Context, logger ports.Logger, label string, estimatedTotal int64, interval time.Duration, paths ...string) func() {
 	if logger == nil {
+		return func() {}
+	}
+	if len(paths) == 0 {
 		return func() {}
 	}
 
@@ -144,19 +147,18 @@ func streamFileProgress(ctx context.Context, logger ports.Logger, label, path st
 		for {
 			select {
 			case <-ctx.Done():
-				if st, err := os.Stat(path); err == nil {
-					show(st.Size())
+				if size, ok := firstExistingFileSize(paths); ok {
+					show(size)
 				}
 				if printed && !completed {
 					logger.Println("")
 				}
 				return
 			case <-ticker.C:
-				st, err := os.Stat(path)
-				if err != nil {
+				size, ok := firstExistingFileSize(paths)
+				if !ok {
 					continue
 				}
-				size := st.Size()
 				if size == lastShown {
 					continue
 				}
@@ -169,4 +171,18 @@ func streamFileProgress(ctx context.Context, logger ports.Logger, label, path st
 		cancel()
 		<-done
 	}
+}
+
+func firstExistingFileSize(paths []string) (int64, bool) {
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		st, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		return st.Size(), true
+	}
+	return 0, false
 }

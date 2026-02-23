@@ -3,11 +3,13 @@ package devnet
 import (
 	"context"
 	"fmt"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
+	"github.com/altuslabsxyz/devnet-builder/types"
 	"github.com/altuslabsxyz/devnet-builder/types/ctxconfig"
 )
 
@@ -72,8 +74,7 @@ func (uc *RunUseCase) Execute(ctx context.Context, input dto.RunInput) (*dto.Run
 	for i, node := range nodes {
 		uc.logger.Debug("Starting node %d...", node.Index)
 
-		cmd := uc.buildStartCommand(node, metadata)
-		handle, err := uc.executor.Start(ctx, cmd)
+		handle, err := uc.startNode(ctx, node, metadata)
 		if err != nil {
 			uc.logger.Error("Failed to start node %d: %v", node.Index, err)
 			allRunning = false
@@ -86,18 +87,29 @@ func (uc *RunUseCase) Execute(ctx context.Context, input dto.RunInput) (*dto.Run
 			continue
 		}
 
-		pid := handle.PID()
-		node.PID = &pid
+		node.PID = nil
+		node.ContainerID = ""
+		status := dto.NodeStatus{
+			Index:     node.Index,
+			Name:      node.Name,
+			IsRunning: true,
+		}
+
+		if metadata.ExecutionMode == types.ExecutionModeDocker {
+			if dockerHandle, ok := handle.(ports.DockerHandle); ok {
+				node.ContainerID = dockerHandle.ContainerID()
+			}
+		} else {
+			pid := handle.PID()
+			node.PID = &pid
+			status.PID = &pid
+		}
+
 		if err := uc.nodeRepo.Save(ctx, node); err != nil {
 			uc.logger.Warn("Failed to save node %d state: %v", node.Index, err)
 		}
 
-		statuses[i] = dto.NodeStatus{
-			Index:     node.Index,
-			Name:      node.Name,
-			IsRunning: true,
-			PID:       &pid,
-		}
+		statuses[i] = status
 		printLoopProgress(uc.logger, "Starting nodes", i+1, len(nodes))
 	}
 
@@ -110,18 +122,88 @@ func (uc *RunUseCase) Execute(ctx context.Context, input dto.RunInput) (*dto.Run
 	}
 
 	// Update metadata
-	metadata.Status = ports.StateRunning
+	if allRunning {
+		metadata.Status = ports.StateRunning
+	} else {
+		metadata.Status = ports.StateFailed
+	}
 	now := time.Now()
 	metadata.LastStarted = &now
 	if err := uc.devnetRepo.Save(ctx, metadata); err != nil {
 		uc.logger.Warn("Failed to update metadata: %v", err)
 	}
 
-	uc.logger.Success("Devnet started!")
+	if allRunning {
+		uc.logger.Success("Devnet started!")
+	} else {
+		uc.logger.Warn("Devnet start completed with failures")
+	}
 	return &dto.RunOutput{
 		Nodes:      statuses,
 		AllRunning: allRunning,
 	}, nil
+}
+
+func (uc *RunUseCase) startNode(ctx context.Context, node *ports.NodeMetadata, metadata *ports.DevnetMetadata) (ports.ProcessHandle, error) {
+	if metadata.ExecutionMode == types.ExecutionModeDocker {
+		return uc.startDockerNode(ctx, node, metadata)
+	}
+
+	cmd := uc.buildStartCommand(node, metadata)
+	return uc.executor.Start(ctx, cmd)
+}
+
+func (uc *RunUseCase) startDockerNode(ctx context.Context, node *ports.NodeMetadata, metadata *ports.DevnetMetadata) (ports.ProcessHandle, error) {
+	dockerExec, ok := uc.executor.(ports.DockerExecutor)
+	if !ok {
+		return nil, fmt.Errorf("docker execution mode requires docker executor")
+	}
+
+	image := strings.TrimSpace(metadata.DockerImage)
+	if image == "" && uc.networkModule != nil {
+		image = strings.TrimSpace(uc.networkModule.DockerImage())
+	}
+	if image == "" {
+		return nil, fmt.Errorf("docker image is required for docker mode")
+	}
+
+	containerHome := "/data"
+	if uc.networkModule != nil {
+		if home := strings.TrimSpace(uc.networkModule.DockerHomeDir()); home != "" {
+			containerHome = home
+		}
+	}
+
+	args := []string{"start", "--home", containerHome}
+	if uc.networkModule != nil {
+		args = uc.networkModule.StartCommand(containerHome, metadata.NetworkName)
+	}
+
+	if metadata.ChainID != "" && !containsArg(args, "--chain-id") {
+		args = append(args, "--chain-id", metadata.ChainID)
+	}
+
+	containerName := dockerContainerName(metadata.BlockchainNetwork, node.Index)
+	if removeErr := dockerExec.RemoveContainer(ctx, containerName, true); removeErr != nil {
+		uc.logger.Debug("Failed to remove existing container %s: %v", containerName, removeErr)
+	}
+
+	return dockerExec.RunContainer(ctx, ports.ContainerConfig{
+		Image:       image,
+		Name:        containerName,
+		Cmd:         args,
+		Env:         []string{fmt.Sprintf("HOME=%s", containerHome)},
+		Volumes:     []ports.VolumeMount{{Source: node.HomeDir, Target: containerHome}},
+		NetworkMode: "host",
+	})
+}
+
+func dockerContainerName(network string, index int) string {
+	name := strings.ToLower(strings.TrimSpace(network))
+	if name == "" {
+		name = "stable"
+	}
+	return fmt.Sprintf("%s-devnet-node%d", name, index)
 }
 
 func (uc *RunUseCase) buildStartCommand(node *ports.NodeMetadata, metadata *ports.DevnetMetadata) ports.Command {
@@ -164,6 +246,15 @@ func (uc *RunUseCase) buildStartCommand(node *ports.NodeMetadata, metadata *port
 		LogPath: fmt.Sprintf("%s/%s", node.HomeDir, logFileName),
 		PIDPath: fmt.Sprintf("%s/%s", node.HomeDir, pidFileName),
 	}
+}
+
+func containsArg(args []string, key string) bool {
+	for _, arg := range args {
+		if arg == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (uc *RunUseCase) waitForHealth(ctx context.Context, nodes []*ports.NodeMetadata, timeout time.Duration) error {
@@ -244,28 +335,55 @@ func (uc *StopUseCase) Execute(ctx context.Context, input dto.StopInput) (*dto.S
 	var warnings []string
 
 	for _, node := range nodes {
-		if node.PID == nil {
-			uc.logger.Debug("Node %d has no PID, skipping", node.Index)
-			continue
-		}
+		if metadata.ExecutionMode == types.ExecutionModeDocker {
+			ref := strings.TrimSpace(node.ContainerID)
+			if ref == "" {
+				ref = dockerContainerName(metadata.BlockchainNetwork, node.Index)
+			}
 
-		uc.logger.Debug("Stopping node %d (PID: %d)...", node.Index, *node.PID)
+			dockerExec, ok := uc.executor.(ports.DockerExecutor)
+			if !ok {
+				warnings = append(warnings, fmt.Sprintf("failed to stop node %d: docker executor not configured", node.Index))
+				continue
+			}
 
-		// Kill the process directly using syscall
-		if err := killProcess(*node.PID, input.Timeout); err != nil {
-			if input.Force {
-				// Force kill with SIGKILL
-				if err := forceKillProcess(*node.PID); err != nil {
-					warnings = append(warnings, fmt.Sprintf("failed to kill node %d: %v", node.Index, err))
+			uc.logger.Debug("Stopping node %d (container: %s)...", node.Index, ref)
+			if err := dockerExec.StopContainer(ctx, ref, input.Timeout); err != nil {
+				if input.Force {
+					if err := dockerExec.RemoveContainer(ctx, ref, true); err != nil {
+						warnings = append(warnings, fmt.Sprintf("failed to force remove node %d container %s: %v", node.Index, ref, err))
+						continue
+					}
+				} else {
+					warnings = append(warnings, fmt.Sprintf("failed to stop node %d container %s: %v", node.Index, ref, err))
 					continue
 				}
-			} else {
-				warnings = append(warnings, fmt.Sprintf("failed to stop node %d: %v", node.Index, err))
+			}
+		} else {
+			if node.PID == nil {
+				uc.logger.Debug("Node %d has no PID, skipping", node.Index)
 				continue
+			}
+
+			uc.logger.Debug("Stopping node %d (PID: %d)...", node.Index, *node.PID)
+
+			// Kill the process directly using syscall
+			if err := killProcess(*node.PID, input.Timeout); err != nil {
+				if input.Force {
+					// Force kill with SIGKILL
+					if err := forceKillProcess(*node.PID); err != nil {
+						warnings = append(warnings, fmt.Sprintf("failed to kill node %d: %v", node.Index, err))
+						continue
+					}
+				} else {
+					warnings = append(warnings, fmt.Sprintf("failed to stop node %d: %v", node.Index, err))
+					continue
+				}
 			}
 		}
 
 		node.PID = nil
+		node.ContainerID = ""
 		if err := uc.nodeRepo.Save(ctx, node); err != nil {
 			uc.logger.Warn("Failed to save node %d state: %v", node.Index, err)
 		}
