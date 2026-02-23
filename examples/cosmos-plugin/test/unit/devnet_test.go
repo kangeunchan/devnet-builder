@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/internal/plugin"
+	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/plugin"
 	"github.com/altuslabsxyz/devnet-builder/pkg/network"
 )
 
@@ -124,6 +124,59 @@ func TestGenerateDevnet_UsesGenesisFileAsTemplateInputOnly(t *testing.T) {
 	}
 	if string(outBytes) != string(template) {
 		t.Fatalf("generated genesis should come from template input")
+	}
+}
+
+func TestGenerateDevnet_FundsAdditionalAccountsWithConfiguredBalance(t *testing.T) {
+	outputDir := t.TempDir()
+	collectHome := filepath.Join(outputDir, "validator0")
+
+	type call struct {
+		args []string
+	}
+	var addAccountCalls []call
+
+	networkModule := cosmos.New(cosmos.WithCommandRunner(newFakeCommandRunner(t, fakeRunnerOptions{
+		onAddGenesisAccount: func(args []string) {
+			addAccountCalls = append(addAccountCalls, call{args: append([]string(nil), args...)})
+		},
+	})))
+
+	err := networkModule.GenerateDevnet(context.Background(), network.GeneratorConfig{
+		NumValidators:    1,
+		NumAccounts:      2,
+		OutputDir:        outputDir,
+		ChainID:          "test-chain",
+		AccountBalance:   "42uatom",
+		ValidatorBalance: "99uatom",
+	}, "")
+	if err != nil {
+		t.Fatalf("GenerateDevnet returned error: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, c := range addAccountCalls {
+		if len(c.args) < 6 {
+			continue
+		}
+		address := c.args[2]
+		balance := c.args[3]
+		home := argValue(c.args, "--home")
+
+		if home != collectHome {
+			continue
+		}
+		if !strings.HasPrefix(address, "cosmos1account") {
+			continue
+		}
+		if balance != "42uatom" {
+			t.Fatalf("unexpected additional account balance for %s: %s", address, balance)
+		}
+		found[address] = true
+	}
+
+	if !found["cosmos1account0"] || !found["cosmos1account1"] {
+		t.Fatalf("expected additional account funding calls for account0/account1, got %v", found)
 	}
 }
 
