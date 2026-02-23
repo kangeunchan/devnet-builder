@@ -3,7 +3,7 @@ package unit
 import (
 	"testing"
 
-	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/internal/plugin"
+	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/plugin"
 )
 
 func TestStartCommand_UsesNetworkChainID(t *testing.T) {
