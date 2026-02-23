@@ -90,3 +90,43 @@ func TestNodeInitializerConfig_DockerBaseArgsIncludesUserMapping(t *testing.T) {
 
 	t.Fatalf("dockerBaseArgs() missing --user argument: %#v", args)
 }
+
+func TestWithDockerStdinAttached_InsertsInteractiveFlagBeforeImage(t *testing.T) {
+	baseArgs := []string{
+		"run", "--rm",
+		"--user", "1000:1000",
+		"-e", "HOME=/data",
+		"-v", "/tmp/node0:/data",
+		"--entrypoint", "gaiad",
+		"ghcr.io/cosmos/gaia:v25.3.2",
+	}
+
+	got := withDockerStdinAttached(baseArgs)
+
+	want := []string{
+		"run", "--rm",
+		"--user", "1000:1000",
+		"-e", "HOME=/data",
+		"-v", "/tmp/node0:/data",
+		"--entrypoint", "gaiad",
+		"-i",
+		"ghcr.io/cosmos/gaia:v25.3.2",
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("withDockerStdinAttached() length = %d, want %d, got %#v", len(got), len(want), got)
+	}
+	for idx := range want {
+		if got[idx] != want[idx] {
+			t.Fatalf("withDockerStdinAttached()[%d] = %q, want %q (full: %#v)", idx, got[idx], want[idx], got)
+		}
+	}
+}
+
+func TestWithDockerStdinAttached_EmptyArgsNoop(t *testing.T) {
+	var args []string
+	got := withDockerStdinAttached(args)
+	if len(got) != 0 {
+		t.Fatalf("withDockerStdinAttached(empty) = %#v, want empty", got)
+	}
+}
