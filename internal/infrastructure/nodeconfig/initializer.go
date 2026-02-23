@@ -493,6 +493,9 @@ func (i *NodeInitializer) runDockerKeyCommand(ctx context.Context, keyringDir st
 	}
 
 	args := i.dockerBaseArgs(keyringDir)
+	if strings.TrimSpace(stdin) != "" {
+		args = withDockerStdinAttached(args)
+	}
 	args = append(args, command...)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -505,6 +508,19 @@ func (i *NodeInitializer) runDockerKeyCommand(ctx context.Context, keyringDir st
 		return nil, fmt.Errorf("docker command failed: %s: %w", string(output), err)
 	}
 	return output, nil
+}
+
+func withDockerStdinAttached(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+
+	imageIdx := len(args) - 1
+	out := make([]string, 0, len(args)+1)
+	out = append(out, args[:imageIdx]...)
+	out = append(out, "-i")
+	out = append(out, args[imageIdx:]...)
+	return out
 }
 
 func (i *NodeInitializer) createAccountKeyDocker(ctx context.Context, keyringDir, keyName string) (*ports.AccountKeyInfo, error) {
