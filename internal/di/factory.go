@@ -317,7 +317,7 @@ func (h *healthCheckerAdapter) CheckNode(ctx context.Context, rpcEndpoint string
 func (h *healthCheckerAdapter) CheckAllNodes(ctx context.Context, nodes []*ports.NodeMetadata) ([]*ports.HealthStatus, error) {
 	results := make([]*ports.HealthStatus, len(nodes))
 	for i, node := range nodes {
-		endpoint := fmt.Sprintf("http://localhost:%d", node.Ports.RPC)
+		endpoint := fmt.Sprintf("http://127.0.0.1:%d", node.Ports.RPC)
 		status, err := h.CheckNode(ctx, endpoint)
 		if err != nil {
 			results[i] = &ports.HealthStatus{
@@ -357,11 +357,11 @@ func (f *InfrastructureFactory) WireContainer(opts ...Option) (*Container, error
 	binaryVersionDetector := f.CreateBinaryVersionDetector()
 
 	// Default RPC client (node0)
-	rpcClient := f.CreateRPCClient("localhost", 26657)
+	rpcClient := f.CreateRPCClient("127.0.0.1", 26657)
 	healthChecker := f.CreateHealthChecker(26657)
 
 	// Default EVM client (node0 EVM port)
-	evmClient := f.CreateEVMClient("http://localhost:8545")
+	evmClient := f.CreateEVMClient("http://127.0.0.1:8545")
 
 	// Validator key loader
 	validatorKeyLoader := f.CreateValidatorKeyLoader()
@@ -681,9 +681,9 @@ func (f *InfrastructureFactory) WireContainerV2(opts ...OptionV2) (*ContainerV2,
 	}
 
 	binaryVersionDetector := f.CreateBinaryVersionDetector()
-	rpcClient := f.CreateRPCClient("localhost", 26657)
+	rpcClient := f.CreateRPCClient("127.0.0.1", 26657)
 	healthChecker := f.CreateHealthChecker(26657)
-	evmClient := f.CreateEVMClient("http://localhost:8545")
+	evmClient := f.CreateEVMClient("http://127.0.0.1:8545")
 	validatorKeyLoader := f.CreateValidatorKeyLoader()
 	githubClient := f.CreateGitHubClient()
 	interactiveSelector := f.CreateInteractiveSelector()

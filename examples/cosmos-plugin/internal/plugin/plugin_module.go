@@ -210,7 +210,9 @@ func (n *CosmosNetwork) InitCommand(homeDir, chainID, moniker string) []string {
 }
 
 func (n *CosmosNetwork) StartCommand(homeDir string, networkMode string) []string {
-	return []string{"start", "--home", homeDir}
+	// Disable fastnode migration by default for forked large-state devnets.
+	// This avoids known startup failures during IAVL fastnode upgrade on exported state.
+	return []string{"start", "--home", homeDir, "--iavl-disable-fastnode"}
 }
 
 func (n *CosmosNetwork) ExportCommand(homeDir string) []string {
