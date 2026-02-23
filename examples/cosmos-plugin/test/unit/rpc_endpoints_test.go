@@ -1,9 +1,10 @@
 package unit
 
 import (
+	"context"
 	"testing"
 
-	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/internal/plugin"
+	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/plugin"
 )
 
 func TestRPCEndpoint_Defaults(t *testing.T) {
@@ -18,15 +19,20 @@ func TestRPCEndpoint_Defaults(t *testing.T) {
 }
 
 func TestSnapshotURL_Defaults(t *testing.T) {
-	networkModule := cosmos.New(cosmos.WithSnapshotResolver(func(networkType string) string {
-		switch networkType {
-		case "mainnet":
-			return "https://snapshots.polkachu.com/snapshots/cosmos/cosmos_123.tar.lz4"
-		case "testnet":
-			return "https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_456.tar.lz4"
-		default:
-			return ""
-		}
+	networkModule := cosmos.New(cosmos.WithHooks(cosmos.Hooks{
+		SnapshotURLResolver: func(ctx context.Context, networkType string, profile cosmos.NetworkProfileConfig, cfg cosmos.Customization) (string, error) {
+			_ = ctx
+			_ = profile
+			_ = cfg
+			switch networkType {
+			case "mainnet":
+				return "https://snapshots.polkachu.com/snapshots/cosmos/cosmos_123.tar.lz4", nil
+			case "testnet":
+				return "https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_456.tar.lz4", nil
+			default:
+				return "", nil
+			}
+		},
 	}))
 
 	if got := networkModule.SnapshotURL("mainnet"); got != "https://snapshots.polkachu.com/snapshots/cosmos/cosmos_123.tar.lz4" {
@@ -58,15 +64,20 @@ func TestRPCEndpoints_ContainOnlyPrimary(t *testing.T) {
 }
 
 func TestSnapshotURLs_ContainOnlyPrimary(t *testing.T) {
-	networkModule := cosmos.New(cosmos.WithSnapshotResolver(func(networkType string) string {
-		switch networkType {
-		case "mainnet":
-			return "https://snapshots.polkachu.com/snapshots/cosmos/cosmos_123.tar.lz4"
-		case "testnet":
-			return "https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_456.tar.lz4"
-		default:
-			return ""
-		}
+	networkModule := cosmos.New(cosmos.WithHooks(cosmos.Hooks{
+		SnapshotURLResolver: func(ctx context.Context, networkType string, profile cosmos.NetworkProfileConfig, cfg cosmos.Customization) (string, error) {
+			_ = ctx
+			_ = profile
+			_ = cfg
+			switch networkType {
+			case "mainnet":
+				return "https://snapshots.polkachu.com/snapshots/cosmos/cosmos_123.tar.lz4", nil
+			case "testnet":
+				return "https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_456.tar.lz4", nil
+			default:
+				return "", nil
+			}
+		},
 	}))
 
 	mainnetURLs := networkModule.SnapshotURLs("mainnet")
