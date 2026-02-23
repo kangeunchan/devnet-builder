@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/internal/plugin"
+	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/plugin"
 	"github.com/altuslabsxyz/devnet-builder/pkg/network"
 )
 
