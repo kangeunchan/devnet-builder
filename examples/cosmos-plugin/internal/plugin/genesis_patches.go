@@ -9,8 +9,8 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/pkg/network"
 )
 
-func (n *CosmosNetwork) patchGovParams(appState map[string]interface{}, cfg network.GenesisConfig) {
-	gov, ok := asMap(appState["gov"])
+func (n *CosmosNetwork) patchGovParams(appState map[string]any, cfg network.GenesisConfig) {
+	gov, ok := asMap(appState[appModuleGov])
 	if !ok {
 		return
 	}
@@ -33,13 +33,13 @@ func (n *CosmosNetwork) patchGovParams(appState map[string]interface{}, cfg netw
 		depositParams["max_deposit_period"] = deposit
 	}
 
-	gov["proposals"] = []interface{}{}
-	gov["votes"] = []interface{}{}
-	gov["deposits"] = []interface{}{}
+	gov["proposals"] = []any{}
+	gov["votes"] = []any{}
+	gov["deposits"] = []any{}
 }
 
-func (n *CosmosNetwork) patchStakingState(appState map[string]interface{}, opts network.GenesisOptions, cfg network.GenesisConfig) ([]string, sdkmath.Int) {
-	staking, ok := asMap(appState["staking"])
+func (n *CosmosNetwork) patchStakingState(appState map[string]any, opts network.GenesisOptions, cfg network.GenesisConfig) ([]string, sdkmath.Int) {
+	staking, ok := asMap(appState[appModuleStaking])
 	if !ok {
 		return nil, sdkmath.ZeroInt()
 	}
@@ -58,9 +58,9 @@ func (n *CosmosNetwork) patchStakingState(appState map[string]interface{}, opts 
 		return nil, sdkmath.ZeroInt()
 	}
 
-	validators := make([]interface{}, 0, len(opts.Validators))
-	delegations := make([]interface{}, 0, len(opts.Validators))
-	lastPowers := make([]interface{}, 0, len(opts.Validators))
+	validators := make([]any, 0, len(opts.Validators))
+	delegations := make([]any, 0, len(opts.Validators))
+	lastPowers := make([]any, 0, len(opts.Validators))
 	validatorAccounts := make([]string, 0, len(opts.Validators))
 	bondedTotal := sdkmath.ZeroInt()
 	updateTime := time.Now().UTC().Format(time.RFC3339Nano)
@@ -80,9 +80,9 @@ func (n *CosmosNetwork) patchStakingState(appState map[string]interface{}, opts 
 			moniker = fmt.Sprintf("validator-%d", i)
 		}
 
-		validators = append(validators, map[string]interface{}{
+		validators = append(validators, map[string]any{
 			"operator_address": v.OperatorAddress,
-			"consensus_pubkey": map[string]interface{}{
+			"consensus_pubkey": map[string]any{
 				"@type": "/cosmos.crypto.ed25519.PubKey",
 				"key":   v.ConsPubKey,
 			},
@@ -94,8 +94,8 @@ func (n *CosmosNetwork) patchStakingState(appState map[string]interface{}, opts 
 			"unbonding_height":    "0",
 			"unbonding_time":      "1970-01-01T00:00:00Z",
 			"min_self_delegation": minSelfDelegation,
-			"commission": map[string]interface{}{
-				"commission_rates": map[string]interface{}{
+			"commission": map[string]any{
+				"commission_rates": map[string]any{
 					"rate":            "0.100000000000000000",
 					"max_rate":        "0.200000000000000000",
 					"max_change_rate": "0.010000000000000000",
@@ -107,14 +107,14 @@ func (n *CosmosNetwork) patchStakingState(appState map[string]interface{}, opts 
 		delegatorAddr, err := valoperToAccount(v.OperatorAddress, n.Bech32Prefix())
 		if err == nil && delegatorAddr != "" {
 			validatorAccounts = append(validatorAccounts, delegatorAddr)
-			delegations = append(delegations, map[string]interface{}{
+			delegations = append(delegations, map[string]any{
 				"delegator_address": delegatorAddr,
 				"validator_address": v.OperatorAddress,
 				"shares":            tokensStr + decimalPrecision18,
 			})
 		}
 
-		lastPowers = append(lastPowers, map[string]interface{}{
+		lastPowers = append(lastPowers, map[string]any{
 			"address": v.OperatorAddress,
 			"power":   tokensStr,
 		})
@@ -122,8 +122,8 @@ func (n *CosmosNetwork) patchStakingState(appState map[string]interface{}, opts 
 
 	staking["validators"] = validators
 	staking["delegations"] = delegations
-	staking["unbonding_delegations"] = []interface{}{}
-	staking["redelegations"] = []interface{}{}
+	staking["unbonding_delegations"] = []any{}
+	staking["redelegations"] = []any{}
 	staking["last_validator_powers"] = lastPowers
 	staking["last_total_power"] = bondedTotal.String()
 
@@ -203,57 +203,57 @@ func mergeUniqueAddresses(primary []string, secondary []string) []string {
 	return merged
 }
 
-func (n *CosmosNetwork) patchSlashingState(appState map[string]interface{}) {
-	slashing, ok := asMap(appState["slashing"])
+func (n *CosmosNetwork) patchSlashingState(appState map[string]any) {
+	slashing, ok := asMap(appState[appModuleSlashing])
 	if !ok {
 		return
 	}
 
-	slashing["signing_infos"] = []interface{}{}
-	slashing["missed_blocks"] = []interface{}{}
+	slashing["signing_infos"] = []any{}
+	slashing["missed_blocks"] = []any{}
 }
 
-func (n *CosmosNetwork) patchDistributionState(appState map[string]interface{}, opts network.GenesisOptions) {
-	distribution, ok := asMap(appState["distribution"])
+func (n *CosmosNetwork) patchDistributionState(appState map[string]any, opts network.GenesisOptions) {
+	distribution, ok := asMap(appState[appModuleDistribution])
 	if !ok {
 		return
 	}
 
-	outstanding := make([]interface{}, 0, len(opts.Validators))
-	accumulated := make([]interface{}, 0, len(opts.Validators))
-	historical := make([]interface{}, 0, len(opts.Validators))
-	current := make([]interface{}, 0, len(opts.Validators))
+	outstanding := make([]any, 0, len(opts.Validators))
+	accumulated := make([]any, 0, len(opts.Validators))
+	historical := make([]any, 0, len(opts.Validators))
+	current := make([]any, 0, len(opts.Validators))
 
 	for _, v := range opts.Validators {
 		op := v.OperatorAddress
-		outstanding = append(outstanding, map[string]interface{}{
+		outstanding = append(outstanding, map[string]any{
 			"validator_address":   op,
-			"outstanding_rewards": []interface{}{},
+			"outstanding_rewards": []any{},
 		})
-		accumulated = append(accumulated, map[string]interface{}{
+		accumulated = append(accumulated, map[string]any{
 			"validator_address": op,
-			"accumulated": map[string]interface{}{
-				"commission": []interface{}{},
+			"accumulated": map[string]any{
+				"commission": []any{},
 			},
 		})
-		historical = append(historical, map[string]interface{}{
+		historical = append(historical, map[string]any{
 			"validator_address": op,
-			"rewards": map[string]interface{}{
-				"cumulative_reward_ratio": []interface{}{},
+			"rewards": map[string]any{
+				"cumulative_reward_ratio": []any{},
 				"reference_count":         "1",
 			},
 		})
-		current = append(current, map[string]interface{}{
+		current = append(current, map[string]any{
 			"validator_address": op,
-			"rewards": map[string]interface{}{
-				"rewards": []interface{}{},
+			"rewards": map[string]any{
+				"rewards": []any{},
 				"period":  "1",
 			},
 		})
 	}
 
-	distribution["delegator_starting_infos"] = []interface{}{}
-	distribution["validator_slash_events"] = []interface{}{}
+	distribution["delegator_starting_infos"] = []any{}
+	distribution["validator_slash_events"] = []any{}
 	distribution["previous_proposer"] = ""
 	distribution["outstanding_rewards"] = outstanding
 	distribution["validator_accumulated_commissions"] = accumulated
@@ -268,10 +268,10 @@ func validateGenesisOptions(opts network.GenesisOptions) error {
 	return nil
 }
 
-func (n *CosmosNetwork) patchBankModule(bank map[string]interface{}, auth map[string]interface{}, validatorAccounts []string, bondedTotal sdkmath.Int, cfg network.GenesisConfig, addAccounts []network.GenesisAccountInfo) {
+func (n *CosmosNetwork) patchBankModule(bank map[string]any, auth map[string]any, validatorAccounts []string, bondedTotal sdkmath.Int, cfg network.GenesisConfig, addAccounts []network.GenesisAccountInfo) {
 	defaultFunding := parseAmountIntOrZero("1000000000")
-	validatorFunding := parseCoinAmountOrFallback(n.DefaultGeneratorConfig().ValidatorBalance, cfg.BaseDenom, defaultFunding)
-	accountFunding := parseCoinAmountOrFallback(n.DefaultGeneratorConfig().AccountBalance, cfg.BaseDenom, defaultFunding)
+	validatorFunding, _ := parseCoinAmountWithFallback(n.DefaultGeneratorConfig().ValidatorBalance, cfg.BaseDenom, defaultFunding)
+	accountFunding, _ := parseCoinAmountWithFallback(n.DefaultGeneratorConfig().AccountBalance, cfg.BaseDenom, defaultFunding)
 	targets := make(map[string]sdkmath.Int, len(validatorAccounts))
 	for _, addr := range validatorAccounts {
 		targets[addr] = validatorFunding
@@ -281,7 +281,7 @@ func (n *CosmosNetwork) patchBankModule(bank map[string]interface{}, auth map[st
 		if addr == "" {
 			continue
 		}
-		amount := parseCoinAmountOrFallback(account.Balance, cfg.BaseDenom, accountFunding)
+		amount, _ := parseCoinAmountWithFallback(account.Balance, cfg.BaseDenom, accountFunding)
 		if current, ok := targets[addr]; !ok || current.LT(amount) {
 			targets[addr] = amount
 		}

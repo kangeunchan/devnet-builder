@@ -20,6 +20,9 @@ func (n *CosmosNetwork) GetGovernanceParams(rpcEndpoint, networkType string) (*p
 	defer cancel()
 
 	rest := n.resolveRESTEndpoint(rpcEndpoint, networkType)
+	if rest == "" {
+		return governanceParamsError(missingEndpointError("REST"))
+	}
 
 	var votingResp struct {
 		VotingParams struct {
@@ -28,7 +31,7 @@ func (n *CosmosNetwork) GetGovernanceParams(rpcEndpoint, networkType string) (*p
 		} `json:"voting_params"`
 	}
 	if err := getJSON(ctx, rest+"/cosmos/gov/v1/params/voting", &votingResp); err != nil {
-		return &plugin.GovernanceParamsResponse{Error: err.Error()}, nil
+		return governanceParamsError(err)
 	}
 
 	var depositResp struct {
@@ -38,12 +41,12 @@ func (n *CosmosNetwork) GetGovernanceParams(rpcEndpoint, networkType string) (*p
 		} `json:"deposit_params"`
 	}
 	if err := getJSON(ctx, rest+"/cosmos/gov/v1/params/deposit", &depositResp); err != nil {
-		return &plugin.GovernanceParamsResponse{Error: err.Error()}, nil
+		return governanceParamsError(err)
 	}
 
 	votingPeriodNs, err := parseDurationToNanos(votingResp.VotingParams.VotingPeriod)
 	if err != nil {
-		return &plugin.GovernanceParamsResponse{Error: fmt.Sprintf("invalid voting_period: %v", err)}, nil
+		return governanceParamsError(fmt.Errorf("invalid voting_period: %w", err))
 	}
 	expeditedVotingNs, _ := parseDurationToNanos(votingResp.VotingParams.ExpeditedVotingPeriod)
 
@@ -68,6 +71,9 @@ func (n *CosmosNetwork) GetBlockHeight(ctx context.Context, rpcEndpoint string) 
 	defer cancel()
 
 	rpc := n.resolveRPCEndpoint(rpcEndpoint, "")
+	if rpc == "" {
+		return blockHeightError(missingEndpointError("RPC"))
+	}
 
 	var statusResp struct {
 		Result struct {
@@ -77,12 +83,12 @@ func (n *CosmosNetwork) GetBlockHeight(ctx context.Context, rpcEndpoint string) 
 		} `json:"result"`
 	}
 	if err := getJSON(ctx, rpc+"/status", &statusResp); err != nil {
-		return &plugin.BlockHeightResponse{Error: err.Error()}, nil
+		return blockHeightError(err)
 	}
 
 	height, err := strconv.ParseInt(statusResp.Result.SyncInfo.LatestBlockHeight, 10, 64)
 	if err != nil {
-		return &plugin.BlockHeightResponse{Error: fmt.Sprintf("failed to parse latest_block_height: %v", err)}, nil
+		return blockHeightError(fmt.Errorf("failed to parse latest_block_height: %w", err))
 	}
 
 	return &plugin.BlockHeightResponse{Height: height}, nil
@@ -97,10 +103,10 @@ func (n *CosmosNetwork) GetBlockTime(ctx context.Context, rpcEndpoint string, sa
 
 	heightResp, err := n.GetBlockHeight(ctx, rpcEndpoint)
 	if err != nil {
-		return &plugin.BlockTimeResponse{Error: err.Error()}, nil
+		return blockTimeError(err)
 	}
 	if heightResp.Error != "" {
-		return &plugin.BlockTimeResponse{Error: heightResp.Error}, nil
+		return blockTimeError(errors.New(heightResp.Error))
 	}
 
 	current := heightResp.Height
@@ -111,16 +117,16 @@ func (n *CosmosNetwork) GetBlockTime(ctx context.Context, rpcEndpoint string, sa
 
 	t1, err := n.getBlockTimestamp(ctx, rpcEndpoint, start)
 	if err != nil {
-		return &plugin.BlockTimeResponse{Error: err.Error()}, nil
+		return blockTimeError(err)
 	}
 	t2, err := n.getBlockTimestamp(ctx, rpcEndpoint, current)
 	if err != nil {
-		return &plugin.BlockTimeResponse{Error: err.Error()}, nil
+		return blockTimeError(err)
 	}
 
 	count := current - start
 	if count <= 0 {
-		return &plugin.BlockTimeResponse{Error: "insufficient block samples"}, nil
+		return blockTimeError(fmt.Errorf("insufficient block samples"))
 	}
 	avg := t2.Sub(t1) / time.Duration(count)
 	if avg <= 0 {
@@ -135,10 +141,10 @@ func (n *CosmosNetwork) IsChainRunning(ctx context.Context, rpcEndpoint string) 
 
 	heightResp, err := n.GetBlockHeight(ctx, rpcEndpoint)
 	if err != nil {
-		return &plugin.ChainStatusResponse{IsRunning: false, Error: err.Error()}, nil
+		return chainStatusError(err)
 	}
 	if heightResp.Error != "" {
-		return &plugin.ChainStatusResponse{IsRunning: false, Error: heightResp.Error}, nil
+		return chainStatusError(errors.New(heightResp.Error))
 	}
 
 	return &plugin.ChainStatusResponse{IsRunning: true}, nil
@@ -164,17 +170,9 @@ func (n *CosmosNetwork) WaitForBlock(ctx context.Context, rpcEndpoint string, ta
 		case <-ctx.Done():
 			err := ctx.Err()
 			if errors.Is(err, context.Canceled) {
-				return &plugin.WaitForBlockResponse{
-					CurrentHeight: lastHeight,
-					Reached:       false,
-					Error:         "wait canceled",
-				}, nil
+				return waitForBlockError(lastHeight, fmt.Errorf("wait canceled"))
 			}
-			return &plugin.WaitForBlockResponse{
-				CurrentHeight: lastHeight,
-				Reached:       false,
-				Error:         fmt.Sprintf("timeout waiting for height %d", targetHeight),
-			}, nil
+			return waitForBlockError(lastHeight, fmt.Errorf("timeout waiting for height %d", targetHeight))
 		case <-ticker.C:
 			resp, err := n.GetBlockHeight(ctx, rpcEndpoint)
 			if err != nil {
@@ -197,6 +195,9 @@ func (n *CosmosNetwork) GetProposal(ctx context.Context, rpcEndpoint string, pro
 	defer cancel()
 
 	rest := n.resolveRESTEndpoint(rpcEndpoint, "")
+	if rest == "" {
+		return proposalError(missingEndpointError("REST"))
+	}
 
 	var result struct {
 		Proposal struct {
@@ -217,7 +218,7 @@ func (n *CosmosNetwork) GetProposal(ctx context.Context, rpcEndpoint string, pro
 		} `json:"proposal"`
 	}
 	if err := getJSON(ctx, fmt.Sprintf("%s/cosmos/gov/v1/proposals/%d", rest, proposalID), &result); err != nil {
-		return &plugin.ProposalResponse{Error: err.Error()}, nil
+		return proposalError(err)
 	}
 
 	title := strings.TrimSpace(result.Proposal.Title)
@@ -247,6 +248,9 @@ func (n *CosmosNetwork) GetUpgradePlan(ctx context.Context, rpcEndpoint string) 
 	defer cancel()
 
 	rest := n.resolveRESTEndpoint(rpcEndpoint, "")
+	if rest == "" {
+		return upgradePlanError(missingEndpointError("REST"))
+	}
 
 	var result struct {
 		Plan *struct {
@@ -257,7 +261,7 @@ func (n *CosmosNetwork) GetUpgradePlan(ctx context.Context, rpcEndpoint string) 
 		} `json:"plan"`
 	}
 	if err := getJSON(ctx, rest+"/cosmos/upgrade/v1beta1/current_plan", &result); err != nil {
-		return &plugin.UpgradePlanResponse{Error: err.Error()}, nil
+		return upgradePlanError(err)
 	}
 
 	if result.Plan == nil {
@@ -280,6 +284,9 @@ func (n *CosmosNetwork) GetAppVersion(ctx context.Context, rpcEndpoint string) (
 	defer cancel()
 
 	rpc := n.resolveRPCEndpoint(rpcEndpoint, "")
+	if rpc == "" {
+		return appVersionError(missingEndpointError("RPC"))
+	}
 
 	var result struct {
 		Result struct {
@@ -289,7 +296,7 @@ func (n *CosmosNetwork) GetAppVersion(ctx context.Context, rpcEndpoint string) (
 		} `json:"result"`
 	}
 	if err := getJSON(ctx, rpc+"/abci_info", &result); err != nil {
-		return &plugin.AppVersionResponse{Error: err.Error()}, nil
+		return appVersionError(err)
 	}
 
 	return &plugin.AppVersionResponse{Version: result.Result.Response.Version}, nil
@@ -297,6 +304,9 @@ func (n *CosmosNetwork) GetAppVersion(ctx context.Context, rpcEndpoint string) (
 
 func (n *CosmosNetwork) getBlockTimestamp(ctx context.Context, rpcEndpoint string, height int64) (time.Time, error) {
 	rpc := n.resolveRPCEndpoint(rpcEndpoint, "")
+	if rpc == "" {
+		return time.Time{}, missingEndpointError("RPC")
+	}
 
 	var resp struct {
 		Result struct {

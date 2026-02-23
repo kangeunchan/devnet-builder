@@ -38,7 +38,7 @@ func discardJSONValue(dec *json.Decoder) error {
 	return dec.Decode(&raw)
 }
 
-func writeJSONValue(w io.Writer, value interface{}) error {
+func writeJSONValue(w io.Writer, value any) error {
 	b, err := json.Marshal(value)
 	if err != nil {
 		return err
@@ -47,17 +47,17 @@ func writeJSONValue(w io.Writer, value interface{}) error {
 	return err
 }
 
-func readObjectValue(dec *json.Decoder) (map[string]interface{}, error) {
-	var out map[string]interface{}
+func readObjectValue(dec *json.Decoder) (map[string]any, error) {
+	var out map[string]any
 	if err := dec.Decode(&out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func ensureMap(in map[string]interface{}) map[string]interface{} {
+func ensureMap(in map[string]any) map[string]any {
 	if in == nil {
-		return map[string]interface{}{}
+		return map[string]any{}
 	}
 	return in
 }

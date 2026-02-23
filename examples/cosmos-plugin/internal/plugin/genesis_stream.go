@@ -43,30 +43,30 @@ func (n *CosmosNetwork) streamModifyGenesis(dec *json.Decoder, w io.Writer, opts
 		}
 
 		switch key {
-		case "chain_id":
+		case genesisFieldChainID:
 			hasChainID = true
 			if opts.ChainID == "" {
 				if err := writeRawJSONValue(dec, w); err != nil {
-					return fmt.Errorf("failed to copy chain_id: %w", err)
+					return fmt.Errorf("failed to copy %s: %w", genesisFieldChainID, err)
 				}
 				continue
 			}
 
 			if err := discardJSONValue(dec); err != nil {
-				return fmt.Errorf("failed to discard chain_id: %w", err)
+				return fmt.Errorf("failed to discard %s: %w", genesisFieldChainID, err)
 			}
 			if err := writeJSONValue(w, opts.ChainID); err != nil {
-				return fmt.Errorf("failed to write chain_id: %w", err)
+				return fmt.Errorf("failed to write %s: %w", genesisFieldChainID, err)
 			}
-		case "validators":
+		case genesisFieldValidators:
 			hasValidators = true
 			if err := discardJSONValue(dec); err != nil {
-				return fmt.Errorf("failed to discard validators: %w", err)
+				return fmt.Errorf("failed to discard %s: %w", genesisFieldValidators, err)
 			}
-			if err := writeJSONValue(w, []interface{}{}); err != nil {
-				return fmt.Errorf("failed to write validators: %w", err)
+			if err := writeJSONValue(w, []any{}); err != nil {
+				return fmt.Errorf("failed to write %s: %w", genesisFieldValidators, err)
 			}
-		case "app_state":
+		case genesisFieldAppState:
 			hasAppState = true
 			if err := n.streamModifyAppState(dec, w, opts, cfg); err != nil {
 				return err
@@ -79,24 +79,24 @@ func (n *CosmosNetwork) streamModifyGenesis(dec *json.Decoder, w io.Writer, opts
 	}
 
 	if !hasAppState {
-		return fmt.Errorf("genesis missing app_state")
+		return fmt.Errorf("genesis missing %s", genesisFieldAppState)
 	}
 
 	if opts.ChainID != "" && !hasChainID {
-		if err := writeObjectKey(w, &first, "chain_id"); err != nil {
+		if err := writeObjectKey(w, &first, genesisFieldChainID); err != nil {
 			return err
 		}
 		if err := writeJSONValue(w, opts.ChainID); err != nil {
-			return fmt.Errorf("failed to write chain_id: %w", err)
+			return fmt.Errorf("failed to write %s: %w", genesisFieldChainID, err)
 		}
 	}
 
 	if !hasValidators {
-		if err := writeObjectKey(w, &first, "validators"); err != nil {
+		if err := writeObjectKey(w, &first, genesisFieldValidators); err != nil {
 			return err
 		}
-		if err := writeJSONValue(w, []interface{}{}); err != nil {
-			return fmt.Errorf("failed to write validators: %w", err)
+		if err := writeJSONValue(w, []any{}); err != nil {
+			return fmt.Errorf("failed to write %s: %w", genesisFieldValidators, err)
 		}
 	}
 
@@ -135,8 +135,8 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 	extraAccountAddresses := collectGenesisAccountAddresses(opts.AddAccounts)
 	first := true
 
-	var authModule map[string]interface{}
-	var deferredBank map[string]interface{}
+	var authModule map[string]any
+	var deferredBank map[string]any
 	hasDeferredBank := false
 
 	for dec.More() {
@@ -149,23 +149,23 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 			return fmt.Errorf("invalid app_state field token type %T", keyTok)
 		}
 		switch key {
-		case "gov":
-			module, err := decodeModuleObject(dec, "gov")
+		case appModuleGov:
+			module, err := decodeModuleObject(dec, appModuleGov)
 			if err != nil {
 				return err
 			}
-			n.patchGovParams(map[string]interface{}{"gov": module}, cfg)
+			n.patchGovParams(map[string]any{appModuleGov: module}, cfg)
 
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
 			}
-		case "staking":
-			module, err := decodeModuleObject(dec, "staking")
+		case appModuleStaking:
+			module, err := decodeModuleObject(dec, appModuleStaking)
 			if err != nil {
 				return err
 			}
 			actualValidatorAccounts, actualBondedTotal := n.patchStakingState(
-				map[string]interface{}{"staking": module}, opts, cfg)
+				map[string]any{appModuleStaking: module}, opts, cfg)
 			if actualValidatorAccounts != nil {
 				validatorAccounts = actualValidatorAccounts
 				bondedTotal = actualBondedTotal
@@ -174,28 +174,28 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
 			}
-		case "slashing":
-			module, err := decodeModuleObject(dec, "slashing")
+		case appModuleSlashing:
+			module, err := decodeModuleObject(dec, appModuleSlashing)
 			if err != nil {
 				return err
 			}
-			n.patchSlashingState(map[string]interface{}{"slashing": module})
+			n.patchSlashingState(map[string]any{appModuleSlashing: module})
 
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
 			}
-		case "distribution":
-			module, err := decodeModuleObject(dec, "distribution")
+		case appModuleDistribution:
+			module, err := decodeModuleObject(dec, appModuleDistribution)
 			if err != nil {
 				return err
 			}
-			n.patchDistributionState(map[string]interface{}{"distribution": module}, opts)
+			n.patchDistributionState(map[string]any{appModuleDistribution: module}, opts)
 
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
 			}
-		case "auth":
-			module, err := decodeModuleObject(dec, "auth")
+		case appModuleAuth:
+			module, err := decodeModuleObject(dec, appModuleAuth)
 			if err != nil {
 				return err
 			}
@@ -205,19 +205,19 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
 			}
-		case "bank":
-			module, err := decodeModuleObject(dec, "bank")
+		case appModuleBank:
+			module, err := decodeModuleObject(dec, appModuleBank)
 			if err != nil {
 				return err
 			}
 			deferredBank = module
 			hasDeferredBank = true
-		case "genutil":
-			module, err := decodeModuleObject(dec, "genutil")
+		case appModuleGenutil:
+			module, err := decodeModuleObject(dec, appModuleGenutil)
 			if err != nil {
 				return err
 			}
-			module["gen_txs"] = []interface{}{}
+			module["gen_txs"] = []any{}
 
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
@@ -234,11 +234,11 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 
 	if hasDeferredBank {
 		n.patchBankModule(deferredBank, authModule, validatorAccounts, bondedTotal, cfg, opts.AddAccounts)
-		if err := writeObjectKey(w, &first, "bank"); err != nil {
+		if err := writeObjectKey(w, &first, appModuleBank); err != nil {
 			return err
 		}
 		if err := writeJSONValue(w, deferredBank); err != nil {
-			return fmt.Errorf("failed to write bank module: %w", err)
+			return fmt.Errorf("failed to write %s module: %w", appModuleBank, err)
 		}
 	}
 
@@ -254,7 +254,7 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 	return err
 }
 
-func decodeModuleObject(dec *json.Decoder, moduleName string) (map[string]interface{}, error) {
+func decodeModuleObject(dec *json.Decoder, moduleName string) (map[string]any, error) {
 	module, err := readObjectValue(dec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode %s module: %w", moduleName, err)
@@ -262,7 +262,7 @@ func decodeModuleObject(dec *json.Decoder, moduleName string) (map[string]interf
 	return ensureMap(module), nil
 }
 
-func writeModuleObject(w io.Writer, first *bool, moduleName string, module map[string]interface{}) error {
+func writeModuleObject(w io.Writer, first *bool, moduleName string, module map[string]any) error {
 	if err := writeObjectKey(w, first, moduleName); err != nil {
 		return err
 	}

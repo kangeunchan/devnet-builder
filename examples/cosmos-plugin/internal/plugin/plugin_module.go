@@ -3,6 +3,7 @@ package cosmos
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -52,7 +53,19 @@ func WithSnapshotResolver(resolver func(networkType string) string) Option {
 		if resolver == nil {
 			return
 		}
-		n.snapshotResolver = resolver
+		n.snapshotResolver = func(ctx context.Context, networkType string) (string, error) {
+			return resolver(networkType), nil
+		}
+	}
+}
+
+// WithSnapshotHTTPClient allows tests to control snapshot index fetch behavior
+// without exposing internal resolver helpers.
+func WithSnapshotHTTPClient(client *http.Client) Option {
+	return func(n *CosmosNetwork) {
+		n.snapshotResolver = func(ctx context.Context, networkType string) (string, error) {
+			return resolveLatestPolkachuSnapshotURLWithClient(ctx, networkType, client)
+		}
 	}
 }
 
@@ -219,7 +232,7 @@ func (n *CosmosNetwork) DefaultGeneratorConfig() network.GeneratorConfig {
 // ============================================
 
 func (n *CosmosNetwork) GetCodec() ([]byte, error) {
-	return nil, nil
+	return []byte{}, nil
 }
 
 func (n *CosmosNetwork) Validate() error {
@@ -240,7 +253,15 @@ func (n *CosmosNetwork) SnapshotURL(networkType string) string {
 	if n.snapshotResolver == nil {
 		return ""
 	}
-	return strings.TrimSpace(n.snapshotResolver(networkType))
+
+	ctx, cancel := context.WithTimeout(context.Background(), snapshotResolverTimeout)
+	defer cancel()
+
+	snapshotURL, err := n.snapshotResolver(ctx, networkType)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(snapshotURL)
 }
 
 func (n *CosmosNetwork) RPCEndpoint(networkType string) string {

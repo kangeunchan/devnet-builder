@@ -23,7 +23,7 @@ func (n *CosmosNetwork) ModifyGenesis(genesis []byte, opts network.GenesisOption
 		return nil, fmt.Errorf("failed to modify genesis: %w", err)
 	}
 
-	var normalized map[string]interface{}
+	var normalized map[string]any
 	if err := json.Unmarshal(streamOut.Bytes(), &normalized); err != nil {
 		return nil, fmt.Errorf("failed to parse modified genesis: %w", err)
 	}

@@ -8,7 +8,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
-func collectModuleAccountAddresses(auth map[string]interface{}) map[string]string {
+func collectModuleAccountAddresses(auth map[string]any) map[string]string {
 	result := map[string]string{}
 	accounts, ok := asSlice(auth["accounts"])
 	if !ok {
@@ -41,7 +41,7 @@ func collectModuleAccountAddresses(auth map[string]interface{}) map[string]strin
 	return result
 }
 
-func ensureAuthBaseAccounts(auth map[string]interface{}, addresses []string) {
+func ensureAuthBaseAccounts(auth map[string]any, addresses []string) {
 	accounts, _ := asSlice(auth["accounts"])
 	existing := map[string]bool{}
 
@@ -56,7 +56,7 @@ func ensureAuthBaseAccounts(auth map[string]interface{}, addresses []string) {
 		if addr == "" || existing[addr] {
 			continue
 		}
-		accounts = append(accounts, map[string]interface{}{
+		accounts = append(accounts, map[string]any{
 			"@type":          "/cosmos.auth.v1beta1.BaseAccount",
 			"address":        addr,
 			"pub_key":        nil,
@@ -69,7 +69,7 @@ func ensureAuthBaseAccounts(auth map[string]interface{}, addresses []string) {
 	auth["accounts"] = accounts
 }
 
-func extractAccountAddress(raw interface{}) string {
+func extractAccountAddress(raw any) string {
 	acc, ok := asMap(raw)
 	if !ok {
 		return ""
@@ -85,8 +85,8 @@ func extractAccountAddress(raw interface{}) string {
 	return ""
 }
 
-func indexBalancesByAddress(balances []interface{}) map[string]map[string]interface{} {
-	idx := map[string]map[string]interface{}{}
+func indexBalancesByAddress(balances []any) map[string]map[string]any {
+	idx := map[string]map[string]any{}
 	for _, raw := range balances {
 		bal, ok := asMap(raw)
 		if !ok {
@@ -100,14 +100,14 @@ func indexBalancesByAddress(balances []interface{}) map[string]map[string]interf
 	return idx
 }
 
-func getOrCreateBalanceEntry(balances *[]interface{}, index map[string]map[string]interface{}, address string) map[string]interface{} {
+func getOrCreateBalanceEntry(balances *[]any, index map[string]map[string]any, address string) map[string]any {
 	if entry, ok := index[address]; ok {
 		return entry
 	}
 
-	entry := map[string]interface{}{
+	entry := map[string]any{
 		"address": address,
-		"coins":   []interface{}{},
+		"coins":   []any{},
 	}
 	*balances = append(*balances, entry)
 	index[address] = entry
@@ -115,7 +115,7 @@ func getOrCreateBalanceEntry(balances *[]interface{}, index map[string]map[strin
 	return entry
 }
 
-func ensureCoinAmount(balance map[string]interface{}, denom string, desired sdkmath.Int) {
+func ensureCoinAmount(balance map[string]any, denom string, desired sdkmath.Int) {
 	coins, _ := asSlice(balance["coins"])
 	found := false
 
@@ -136,13 +136,13 @@ func ensureCoinAmount(balance map[string]interface{}, denom string, desired sdkm
 	}
 
 	if !found {
-		coins = append(coins, map[string]interface{}{"denom": denom, "amount": desired.String()})
+		coins = append(coins, map[string]any{"denom": denom, "amount": desired.String()})
 	}
 
 	balance["coins"] = coins
 }
 
-func recomputeSupplyFromBalances(balances []interface{}) []interface{} {
+func recomputeSupplyFromBalances(balances []any) []any {
 	totalSupply := sdk.NewCoins()
 
 	for _, raw := range balances {
@@ -170,7 +170,7 @@ func recomputeSupplyFromBalances(balances []interface{}) []interface{} {
 	return sdkCoinsToInterfaces(totalSupply.Sort())
 }
 
-func parseCoinEntry(raw map[string]interface{}) (sdk.Coin, bool) {
+func parseCoinEntry(raw map[string]any) (sdk.Coin, bool) {
 	denom := strings.TrimSpace(fmt.Sprint(raw["denom"]))
 	if denom == "" {
 		return sdk.Coin{}, false
@@ -183,10 +183,10 @@ func parseCoinEntry(raw map[string]interface{}) (sdk.Coin, bool) {
 	return sdk.NewCoin(denom, amount), true
 }
 
-func sdkCoinsToInterfaces(coins sdk.Coins) []interface{} {
-	supply := make([]interface{}, 0, len(coins))
+func sdkCoinsToInterfaces(coins sdk.Coins) []any {
+	supply := make([]any, 0, len(coins))
 	for _, c := range coins {
-		supply = append(supply, map[string]interface{}{
+		supply = append(supply, map[string]any{
 			"denom":  c.Denom,
 			"amount": c.Amount.String(),
 		})

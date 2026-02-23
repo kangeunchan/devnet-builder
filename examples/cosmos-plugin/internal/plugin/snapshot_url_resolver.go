@@ -2,77 +2,83 @@ package cosmos
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"strings"
 )
 
-type snapshotResolverFunc func(networkType string) string
+type snapshotResolverFunc func(ctx context.Context, networkType string) (string, error)
 
 var (
 	mainnetSnapshotURLPattern = regexp.MustCompile(`https://snapshots\.polkachu\.com/snapshots/cosmos/cosmos_[0-9]+\.tar\.[a-z0-9]+`)
 	testnetSnapshotURLPattern = regexp.MustCompile(`https://snapshots\.polkachu\.com/testnet-snapshots/cosmos/cosmos_[0-9]+\.tar\.[a-z0-9]+`)
 )
 
-func resolveLatestPolkachuSnapshotURL(networkType string) string {
-	return ResolveLatestPolkachuSnapshotURLWithClient(networkType, httpClient)
+func resolveLatestPolkachuSnapshotURL(ctx context.Context, networkType string) (string, error) {
+	return resolveLatestPolkachuSnapshotURLWithClient(ctx, networkType, httpClient)
 }
 
-// ResolveLatestPolkachuSnapshotURLWithClient resolves the latest snapshot URL
-// from Polkachu index pages for the given network type using the provided HTTP client.
-// This is exported so unit tests outside this package can validate resolver behavior.
-func ResolveLatestPolkachuSnapshotURLWithClient(networkType string, client *http.Client) string {
-	profile, ok := networkProfileByType(networkType)
-	if !ok {
-		return ""
+func resolveLatestPolkachuSnapshotURLWithClient(ctx context.Context, networkType string, client *http.Client) (string, error) {
+	profile, err := requireNetworkProfile(networkType)
+	if err != nil {
+		return "", err
+	}
+
+	if client == nil {
+		client = httpClient
 	}
 
 	switch canonicalNetworkType(networkType) {
 	case networkMainnet:
-		return fetchFirstMatchingSnapshotURL(client, profile.SnapshotIndexURL, mainnetSnapshotURLPattern)
+		return fetchFirstMatchingSnapshotURL(ctx, client, profile.SnapshotIndexURL, mainnetSnapshotURLPattern)
 	case networkTestnet:
-		return fetchFirstMatchingSnapshotURL(client, profile.SnapshotIndexURL, testnetSnapshotURLPattern)
+		return fetchFirstMatchingSnapshotURL(ctx, client, profile.SnapshotIndexURL, testnetSnapshotURLPattern)
 	default:
-		return ""
+		return "", fmt.Errorf("unsupported network type %q", strings.TrimSpace(networkType))
 	}
 }
 
-func fetchFirstMatchingSnapshotURL(client *http.Client, indexURL string, urlPattern *regexp.Regexp) string {
+func fetchFirstMatchingSnapshotURL(ctx context.Context, client *http.Client, indexURL string, urlPattern *regexp.Regexp) (string, error) {
 	if strings.TrimSpace(indexURL) == "" || urlPattern == nil {
-		return ""
+		return "", fmt.Errorf("snapshot index URL and pattern are required")
 	}
 	if client == nil {
 		client = httpClient
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), snapshotResolverTimeout)
-	defer cancel()
+	ctx = ensureContext(ctx)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, snapshotResolverTimeout)
+		defer cancel()
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, indexURL, nil)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("build snapshot index request: %w", err)
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("request snapshot index %q: %w", indexURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return ""
+		return "", fmt.Errorf("snapshot index %q returned http %d", indexURL, resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("read snapshot index %q: %w", indexURL, err)
 	}
 
 	match := urlPattern.Find(body)
 	if len(match) == 0 {
-		return ""
+		return "", fmt.Errorf("no snapshot URL matched in %q", indexURL)
 	}
 
-	return strings.TrimSpace(string(match))
+	return strings.TrimSpace(string(match)), nil
 }

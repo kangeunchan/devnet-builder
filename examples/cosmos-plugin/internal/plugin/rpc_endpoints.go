@@ -6,14 +6,23 @@ import (
 	"strings"
 )
 
+var (
+	defaultRESTToRPCHostMap = buildRESTToRPCHostMap()
+	defaultRPCToRESTHostMap = buildRPCToRESTHostMap()
+)
+
 func (n *CosmosNetwork) resolveRPCEndpoint(raw, networkType string) string {
 	endpoint := strings.TrimSpace(raw)
 	if endpoint == "" {
-		return defaultNetworkProfile(networkType).RPCEndpoint
+		profile, err := requireNetworkProfile(networkType)
+		if err != nil {
+			return ""
+		}
+		return profile.RPCEndpoint
 	}
 
 	endpoint = normalizeEndpoint(endpoint)
-	endpoint = replaceKnownHost(endpoint, restToRPCHostMap())
+	endpoint = replaceKnownHost(endpoint, defaultRESTToRPCHostMap)
 
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -28,7 +37,7 @@ func (n *CosmosNetwork) resolveRPCEndpoint(raw, networkType string) string {
 	}
 
 	if isLocalHost(u.Host) {
-		u.Host = net.JoinHostPort(u.Host, "26657")
+		u.Host = net.JoinHostPort(u.Hostname(), "26657")
 	}
 
 	return strings.TrimRight(u.String(), "/")
@@ -37,11 +46,15 @@ func (n *CosmosNetwork) resolveRPCEndpoint(raw, networkType string) string {
 func (n *CosmosNetwork) resolveRESTEndpoint(raw, networkType string) string {
 	endpoint := strings.TrimSpace(raw)
 	if endpoint == "" {
-		return defaultNetworkProfile(networkType).RESTEndpoint
+		profile, err := requireNetworkProfile(networkType)
+		if err != nil {
+			return ""
+		}
+		return profile.RESTEndpoint
 	}
 
 	endpoint = normalizeEndpoint(endpoint)
-	endpoint = replaceKnownHost(endpoint, rpcToRESTHostMap())
+	endpoint = replaceKnownHost(endpoint, defaultRPCToRESTHostMap)
 
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -56,7 +69,7 @@ func (n *CosmosNetwork) resolveRESTEndpoint(raw, networkType string) string {
 	}
 
 	if isLocalHost(u.Host) {
-		u.Host = net.JoinHostPort(u.Host, "1317")
+		u.Host = net.JoinHostPort(u.Hostname(), "1317")
 	}
 
 	return strings.TrimRight(u.String(), "/")
@@ -74,16 +87,23 @@ func normalizeEndpoint(raw string) string {
 }
 
 func isLocalHost(host string) bool {
-	h := host
+	h := strings.TrimSpace(host)
 	if strings.Contains(h, ":") {
 		if parsedHost, _, err := net.SplitHostPort(h); err == nil {
 			h = parsedHost
 		}
 	}
-	return h == "localhost" || h == "127.0.0.1"
+
+	h = strings.Trim(h, "[]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
-func restToRPCHostMap() map[string]string {
+func buildRESTToRPCHostMap() map[string]string {
 	mapping := make(map[string]string, len(networkProfiles))
 	for _, profile := range allNetworkProfiles() {
 		restHost := endpointHost(profile.RESTEndpoint)
@@ -96,7 +116,7 @@ func restToRPCHostMap() map[string]string {
 	return mapping
 }
 
-func rpcToRESTHostMap() map[string]string {
+func buildRPCToRESTHostMap() map[string]string {
 	mapping := make(map[string]string, len(networkProfiles))
 	for _, profile := range allNetworkProfiles() {
 		restHost := endpointHost(profile.RESTEndpoint)

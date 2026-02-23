@@ -11,13 +11,13 @@ import (
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 )
 
-func asMap(v interface{}) (map[string]interface{}, bool) {
-	m, ok := v.(map[string]interface{})
+func asMap(v any) (map[string]any, bool) {
+	m, ok := v.(map[string]any)
 	return m, ok
 }
 
-func asSlice(v interface{}) ([]interface{}, bool) {
-	s, ok := v.([]interface{})
+func asSlice(v any) ([]any, bool) {
+	s, ok := v.([]any)
 	return s, ok
 }
 
@@ -57,28 +57,30 @@ func parseAmountIntOrFallback(s, fallback string) sdkmath.Int {
 	return parseAmountIntOrZero(fallback)
 }
 
-func parseCoinAmountOrFallback(coinStr, expectedDenom string, fallback sdkmath.Int) sdkmath.Int {
+// parseCoinAmountWithFallback returns the parsed amount and whether fallback was used.
+// Fallback is intentional for malformed optional funding inputs in genesis options.
+func parseCoinAmountWithFallback(coinStr, expectedDenom string, fallback sdkmath.Int) (sdkmath.Int, bool) {
 	coinStr = strings.TrimSpace(coinStr)
 	if coinStr == "" {
-		return fallback
+		return fallback, true
 	}
 
 	coin, err := sdk.ParseCoinNormalized(coinStr)
 	if err != nil {
-		return fallback
+		return fallback, true
 	}
 	if expectedDenom != "" && coin.Denom != expectedDenom {
-		return fallback
+		return fallback, true
 	}
 	if coin.Amount.IsNegative() {
-		return fallback
+		return fallback, true
 	}
 
-	return coin.Amount
+	return coin.Amount, false
 }
 
-func newValidatorDescription(moniker string) map[string]interface{} {
-	return map[string]interface{}{
+func newValidatorDescription(moniker string) map[string]any {
+	return map[string]any{
 		"moniker":          moniker,
 		"identity":         "",
 		"website":          "",

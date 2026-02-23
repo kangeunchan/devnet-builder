@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func getJSON(ctx context.Context, endpoint string, out interface{}) error {
+func getJSON(ctx context.Context, endpoint string, out any) error {
 	ctx = ensureContext(ctx)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)

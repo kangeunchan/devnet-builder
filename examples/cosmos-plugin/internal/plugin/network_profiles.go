@@ -1,6 +1,7 @@
 package cosmos
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 )
@@ -55,11 +56,11 @@ func networkProfileByType(networkType string) (networkProfile, bool) {
 	return profile, ok
 }
 
-func defaultNetworkProfile(networkType string) networkProfile {
+func requireNetworkProfile(networkType string) (networkProfile, error) {
 	if profile, ok := networkProfileByType(networkType); ok {
-		return profile
+		return profile, nil
 	}
-	return networkProfiles[networkMainnet]
+	return networkProfile{}, fmt.Errorf("unsupported network type %q", strings.TrimSpace(networkType))
 }
 
 func allNetworkProfiles() []networkProfile {

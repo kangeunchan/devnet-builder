@@ -35,10 +35,11 @@ func TestResolveLatestPolkachuSnapshotURL_Mainnet(t *testing.T) {
 		}),
 	}
 
-	got := cosmos.ResolveLatestPolkachuSnapshotURLWithClient("mainnet", client)
+	networkModule := cosmos.New(cosmos.WithSnapshotHTTPClient(client))
+	got := networkModule.SnapshotURL("mainnet")
 	want := "https://snapshots.polkachu.com/snapshots/cosmos/cosmos_30000001.tar.lz4"
 	if got != want {
-		t.Fatalf("ResolveLatestPolkachuSnapshotURLWithClient(mainnet) = %q, want %q", got, want)
+		t.Fatalf("SnapshotURL(mainnet) = %q, want %q", got, want)
 	}
 }
 
@@ -66,13 +67,14 @@ func TestResolveLatestPolkachuSnapshotURL_TestnetAndNoMatch(t *testing.T) {
 		}),
 	}
 
-	if got := cosmos.ResolveLatestPolkachuSnapshotURLWithClient("testnet", client); got != "https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_16000000.tar.lz4" {
-		t.Fatalf("ResolveLatestPolkachuSnapshotURLWithClient(testnet) = %q", got)
+	networkModule := cosmos.New(cosmos.WithSnapshotHTTPClient(client))
+	if got := networkModule.SnapshotURL("testnet"); got != "https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_16000000.tar.lz4" {
+		t.Fatalf("SnapshotURL(testnet) = %q", got)
 	}
-	if got := cosmos.ResolveLatestPolkachuSnapshotURLWithClient("mainnet", client); got != "" {
-		t.Fatalf("ResolveLatestPolkachuSnapshotURLWithClient(mainnet) = %q, want empty", got)
+	if got := networkModule.SnapshotURL("mainnet"); got != "" {
+		t.Fatalf("SnapshotURL(mainnet) = %q, want empty", got)
 	}
-	if got := cosmos.ResolveLatestPolkachuSnapshotURLWithClient("unknown", client); got != "" {
-		t.Fatalf("ResolveLatestPolkachuSnapshotURLWithClient(unknown) = %q, want empty", got)
+	if got := networkModule.SnapshotURL("unknown"); got != "" {
+		t.Fatalf("SnapshotURL(unknown) = %q, want empty", got)
 	}
 }
