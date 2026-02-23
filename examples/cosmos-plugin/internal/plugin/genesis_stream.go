@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	genesisinternal "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/internal/plugin/genesis"
 	"github.com/altuslabsxyz/devnet-builder/pkg/network"
 )
 
@@ -38,7 +39,7 @@ func (n *CosmosNetwork) streamModifyGenesis(dec *json.Decoder, w io.Writer, opts
 			return fmt.Errorf("invalid genesis field token type %T", keyTok)
 		}
 
-		if err := writeObjectKey(w, &first, key); err != nil {
+		if err := genesisinternal.WriteObjectKey(w, &first, key); err != nil {
 			return err
 		}
 
@@ -46,24 +47,24 @@ func (n *CosmosNetwork) streamModifyGenesis(dec *json.Decoder, w io.Writer, opts
 		case genesisFieldChainID:
 			hasChainID = true
 			if opts.ChainID == "" {
-				if err := writeRawJSONValue(dec, w); err != nil {
+				if err := genesisinternal.WriteRawJSONValue(dec, w); err != nil {
 					return fmt.Errorf("failed to copy %s: %w", genesisFieldChainID, err)
 				}
 				continue
 			}
 
-			if err := discardJSONValue(dec); err != nil {
+			if err := genesisinternal.DiscardJSONValue(dec); err != nil {
 				return fmt.Errorf("failed to discard %s: %w", genesisFieldChainID, err)
 			}
-			if err := writeJSONValue(w, opts.ChainID); err != nil {
+			if err := genesisinternal.WriteJSONValue(w, opts.ChainID); err != nil {
 				return fmt.Errorf("failed to write %s: %w", genesisFieldChainID, err)
 			}
 		case genesisFieldValidators:
 			hasValidators = true
-			if err := discardJSONValue(dec); err != nil {
+			if err := genesisinternal.DiscardJSONValue(dec); err != nil {
 				return fmt.Errorf("failed to discard %s: %w", genesisFieldValidators, err)
 			}
-			if err := writeJSONValue(w, []any{}); err != nil {
+			if err := genesisinternal.WriteJSONValue(w, []any{}); err != nil {
 				return fmt.Errorf("failed to write %s: %w", genesisFieldValidators, err)
 			}
 		case genesisFieldAppState:
@@ -72,7 +73,7 @@ func (n *CosmosNetwork) streamModifyGenesis(dec *json.Decoder, w io.Writer, opts
 				return err
 			}
 		default:
-			if err := writeRawJSONValue(dec, w); err != nil {
+			if err := genesisinternal.WriteRawJSONValue(dec, w); err != nil {
 				return fmt.Errorf("failed to copy field %q: %w", key, err)
 			}
 		}
@@ -83,19 +84,19 @@ func (n *CosmosNetwork) streamModifyGenesis(dec *json.Decoder, w io.Writer, opts
 	}
 
 	if opts.ChainID != "" && !hasChainID {
-		if err := writeObjectKey(w, &first, genesisFieldChainID); err != nil {
+		if err := genesisinternal.WriteObjectKey(w, &first, genesisFieldChainID); err != nil {
 			return err
 		}
-		if err := writeJSONValue(w, opts.ChainID); err != nil {
+		if err := genesisinternal.WriteJSONValue(w, opts.ChainID); err != nil {
 			return fmt.Errorf("failed to write %s: %w", genesisFieldChainID, err)
 		}
 	}
 
 	if !hasValidators {
-		if err := writeObjectKey(w, &first, genesisFieldValidators); err != nil {
+		if err := genesisinternal.WriteObjectKey(w, &first, genesisFieldValidators); err != nil {
 			return err
 		}
-		if err := writeJSONValue(w, []any{}); err != nil {
+		if err := genesisinternal.WriteJSONValue(w, []any{}); err != nil {
 			return fmt.Errorf("failed to write %s: %w", genesisFieldValidators, err)
 		}
 	}
@@ -155,6 +156,9 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 				return err
 			}
 			n.patchGovParams(map[string]any{appModuleGov: module}, cfg)
+			if err := n.applyAdditionalGenesisMutators(appModuleGov, module, opts, cfg); err != nil {
+				return err
+			}
 
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
@@ -170,6 +174,9 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 				validatorAccounts = actualValidatorAccounts
 				bondedTotal = actualBondedTotal
 			}
+			if err := n.applyAdditionalGenesisMutators(appModuleStaking, module, opts, cfg); err != nil {
+				return err
+			}
 
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
@@ -180,6 +187,9 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 				return err
 			}
 			n.patchSlashingState(map[string]any{appModuleSlashing: module})
+			if err := n.applyAdditionalGenesisMutators(appModuleSlashing, module, opts, cfg); err != nil {
+				return err
+			}
 
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
@@ -190,6 +200,9 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 				return err
 			}
 			n.patchDistributionState(map[string]any{appModuleDistribution: module}, opts)
+			if err := n.applyAdditionalGenesisMutators(appModuleDistribution, module, opts, cfg); err != nil {
+				return err
+			}
 
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
@@ -199,8 +212,11 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 			if err != nil {
 				return err
 			}
-			ensureAuthBaseAccounts(module, mergeUniqueAddresses(validatorAccounts, extraAccountAddresses))
+			genesisinternal.EnsureAuthBaseAccounts(module, mergeUniqueAddresses(validatorAccounts, extraAccountAddresses))
 			authModule = module
+			if err := n.applyAdditionalGenesisMutators(appModuleAuth, module, opts, cfg); err != nil {
+				return err
+			}
 
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
@@ -218,26 +234,34 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 				return err
 			}
 			module["gen_txs"] = []any{}
+			if err := n.applyAdditionalGenesisMutators(appModuleGenutil, module, opts, cfg); err != nil {
+				return err
+			}
 
 			if err := writeModuleObject(w, &first, key, module); err != nil {
 				return err
 			}
 		default:
-			if err := writeObjectKey(w, &first, key); err != nil {
+			if err := genesisinternal.WriteObjectKey(w, &first, key); err != nil {
 				return err
 			}
-			if err := writeRawJSONValue(dec, w); err != nil {
+			if err := genesisinternal.WriteRawJSONValue(dec, w); err != nil {
 				return fmt.Errorf("failed to copy app_state module %q: %w", key, err)
 			}
 		}
 	}
 
 	if hasDeferredBank {
-		n.patchBankModule(deferredBank, authModule, validatorAccounts, bondedTotal, cfg, opts.AddAccounts)
-		if err := writeObjectKey(w, &first, appModuleBank); err != nil {
+		if err := n.patchBankModule(deferredBank, authModule, validatorAccounts, bondedTotal, cfg, opts.AddAccounts); err != nil {
+			return fmt.Errorf("failed to patch %s module: %w", appModuleBank, err)
+		}
+		if err := n.applyAdditionalGenesisMutators(appModuleBank, deferredBank, opts, cfg); err != nil {
 			return err
 		}
-		if err := writeJSONValue(w, deferredBank); err != nil {
+		if err := genesisinternal.WriteObjectKey(w, &first, appModuleBank); err != nil {
+			return err
+		}
+		if err := genesisinternal.WriteJSONValue(w, deferredBank); err != nil {
 			return fmt.Errorf("failed to write %s module: %w", appModuleBank, err)
 		}
 	}
@@ -254,19 +278,36 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 	return err
 }
 
+func (n *CosmosNetwork) applyAdditionalGenesisMutators(moduleName string, module map[string]any, opts network.GenesisOptions, cfg network.GenesisConfig) error {
+	if n == nil || len(n.hooks.AdditionalGenesisMutators) == 0 {
+		return nil
+	}
+
+	for _, mutator := range n.hooks.AdditionalGenesisMutators {
+		if mutator == nil {
+			continue
+		}
+		if err := mutator.MutateModule(moduleName, module, opts, cfg); err != nil {
+			return fmt.Errorf("genesis mutator %q failed on %q: %w", mutator.Name(), moduleName, err)
+		}
+	}
+
+	return nil
+}
+
 func decodeModuleObject(dec *json.Decoder, moduleName string) (map[string]any, error) {
-	module, err := readObjectValue(dec)
+	module, err := genesisinternal.ReadObjectValue(dec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode %s module: %w", moduleName, err)
 	}
-	return ensureMap(module), nil
+	return genesisinternal.EnsureMap(module), nil
 }
 
 func writeModuleObject(w io.Writer, first *bool, moduleName string, module map[string]any) error {
-	if err := writeObjectKey(w, first, moduleName); err != nil {
+	if err := genesisinternal.WriteObjectKey(w, first, moduleName); err != nil {
 		return err
 	}
-	if err := writeJSONValue(w, module); err != nil {
+	if err := genesisinternal.WriteJSONValue(w, module); err != nil {
 		return fmt.Errorf("failed to write %s module: %w", moduleName, err)
 	}
 	return nil
