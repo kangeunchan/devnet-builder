@@ -16,6 +16,13 @@ var (
 )
 
 func resolveLatestPolkachuSnapshotURL(networkType string) string {
+	return ResolveLatestPolkachuSnapshotURLWithClient(networkType, httpClient)
+}
+
+// ResolveLatestPolkachuSnapshotURLWithClient resolves the latest snapshot URL
+// from Polkachu index pages for the given network type using the provided HTTP client.
+// This is exported so unit tests outside this package can validate resolver behavior.
+func ResolveLatestPolkachuSnapshotURLWithClient(networkType string, client *http.Client) string {
 	profile, ok := networkProfileByType(networkType)
 	if !ok {
 		return ""
@@ -23,17 +30,20 @@ func resolveLatestPolkachuSnapshotURL(networkType string) string {
 
 	switch canonicalNetworkType(networkType) {
 	case networkMainnet:
-		return fetchFirstMatchingSnapshotURL(profile.SnapshotIndexURL, mainnetSnapshotURLPattern)
+		return fetchFirstMatchingSnapshotURL(client, profile.SnapshotIndexURL, mainnetSnapshotURLPattern)
 	case networkTestnet:
-		return fetchFirstMatchingSnapshotURL(profile.SnapshotIndexURL, testnetSnapshotURLPattern)
+		return fetchFirstMatchingSnapshotURL(client, profile.SnapshotIndexURL, testnetSnapshotURLPattern)
 	default:
 		return ""
 	}
 }
 
-func fetchFirstMatchingSnapshotURL(indexURL string, urlPattern *regexp.Regexp) string {
+func fetchFirstMatchingSnapshotURL(client *http.Client, indexURL string, urlPattern *regexp.Regexp) string {
 	if strings.TrimSpace(indexURL) == "" || urlPattern == nil {
 		return ""
+	}
+	if client == nil {
+		client = httpClient
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), snapshotResolverTimeout)
@@ -44,7 +54,7 @@ func fetchFirstMatchingSnapshotURL(indexURL string, urlPattern *regexp.Regexp) s
 		return ""
 	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return ""
 	}
