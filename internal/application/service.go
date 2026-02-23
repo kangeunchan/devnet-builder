@@ -214,8 +214,8 @@ func (s *DevnetService) GetStatus(ctx context.Context) (*dto.StatusOutput, error
 			HomeDir: n.HomeDir,
 			NodeID:  n.NodeID,
 			Ports:   n.Ports,
-			RPCURL:  fmt.Sprintf("http://localhost:%d", n.Ports.RPC),
-			EVMURL:  fmt.Sprintf("http://localhost:%d", n.Ports.EVMRPC),
+			RPCURL:  fmt.Sprintf("http://127.0.0.1:%d", n.Ports.RPC),
+			EVMURL:  fmt.Sprintf("http://127.0.0.1:%d", n.Ports.EVMRPC),
 		}
 	}
 
@@ -295,8 +295,8 @@ func (s *DevnetService) LoadDevnetInfo(ctx context.Context) (*dto.DevnetInfo, er
 			HomeDir: n.HomeDir,
 			NodeID:  n.NodeID,
 			Ports:   n.Ports,
-			RPCURL:  fmt.Sprintf("http://localhost:%d", n.Ports.RPC),
-			EVMURL:  fmt.Sprintf("http://localhost:%d", n.Ports.EVMRPC),
+			RPCURL:  fmt.Sprintf("http://127.0.0.1:%d", n.Ports.RPC),
+			EVMURL:  fmt.Sprintf("http://127.0.0.1:%d", n.Ports.EVMRPC),
 		}
 	}
 
@@ -894,8 +894,8 @@ func (s *DevnetService) GetNode(ctx context.Context, nodeIndex int) (*dto.NodeIn
 		HomeDir: node.HomeDir,
 		NodeID:  node.NodeID,
 		Ports:   node.Ports,
-		RPCURL:  fmt.Sprintf("http://localhost:%d", node.Ports.RPC),
-		EVMURL:  fmt.Sprintf("http://localhost:%d", node.Ports.EVMRPC),
+		RPCURL:  fmt.Sprintf("http://127.0.0.1:%d", node.Ports.RPC),
+		EVMURL:  fmt.Sprintf("http://127.0.0.1:%d", node.Ports.EVMRPC),
 	}, nil
 }
 
