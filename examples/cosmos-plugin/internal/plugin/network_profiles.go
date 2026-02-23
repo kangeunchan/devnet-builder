@@ -1,7 +1,6 @@
 package cosmos
 
 import (
-	"fmt"
 	"net/url"
 	"strings"
 )
@@ -20,21 +19,6 @@ type networkProfile struct {
 	SnapshotIndexURL string
 }
 
-var networkProfiles = map[string]networkProfile{
-	networkMainnet: {
-		ChainID:          "cosmoshub-4",
-		RPCEndpoint:      "https://cosmoshub.rpc.kjnodes.com",
-		RESTEndpoint:     "https://cosmoshub.api.kjnodes.com",
-		SnapshotIndexURL: "https://www.polkachu.com/tendermint_snapshots/cosmos",
-	},
-	networkTestnet: {
-		ChainID:          "provider",
-		RPCEndpoint:      "https://cosmoshub-testnet.rpc.kjnodes.com",
-		RESTEndpoint:     "https://cosmoshub-testnet.api.kjnodes.com",
-		SnapshotIndexURL: "https://www.polkachu.com/testnets/cosmos/snapshots",
-	},
-}
-
 func canonicalNetworkType(networkType string) string {
 	switch strings.ToLower(strings.TrimSpace(networkType)) {
 	case networkMainnet:
@@ -46,28 +30,29 @@ func canonicalNetworkType(networkType string) string {
 	}
 }
 
-func networkProfileByType(networkType string) (networkProfile, bool) {
-	normalized := canonicalNetworkType(networkType)
-	if normalized == "" {
-		return networkProfile{}, false
+func buildNetworkProfiles(custom map[string]NetworkProfileConfig) map[string]networkProfile {
+	out := make(map[string]networkProfile, len(custom))
+	for key, cfg := range custom {
+		normalized := canonicalNetworkType(key)
+		if normalized == "" {
+			normalized = strings.ToLower(strings.TrimSpace(key))
+		}
+		if normalized == "" {
+			continue
+		}
+
+		if strings.TrimSpace(cfg.ChainID) == "" || strings.TrimSpace(cfg.RPCEndpoint) == "" || strings.TrimSpace(cfg.RESTEndpoint) == "" {
+			continue
+		}
+
+		out[normalized] = networkProfile{
+			ChainID:          strings.TrimSpace(cfg.ChainID),
+			RPCEndpoint:      strings.TrimSpace(cfg.RPCEndpoint),
+			RESTEndpoint:     strings.TrimSpace(cfg.RESTEndpoint),
+			SnapshotIndexURL: strings.TrimSpace(cfg.SnapshotIndexURL),
+		}
 	}
 
-	profile, ok := networkProfiles[normalized]
-	return profile, ok
-}
-
-func requireNetworkProfile(networkType string) (networkProfile, error) {
-	if profile, ok := networkProfileByType(networkType); ok {
-		return profile, nil
-	}
-	return networkProfile{}, fmt.Errorf("unsupported network type %q", strings.TrimSpace(networkType))
-}
-
-func allNetworkProfiles() []networkProfile {
-	out := make([]networkProfile, 0, len(networkProfiles))
-	for _, profile := range networkProfiles {
-		out = append(out, profile)
-	}
 	return out
 }
 
@@ -77,4 +62,46 @@ func endpointHost(raw string) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(u.Hostname()))
+}
+
+func buildRESTToRPCHostMapWithOverrides(profiles map[string]networkProfile, overrides map[string]string) map[string]string {
+	mapping := make(map[string]string, len(profiles)+len(overrides))
+	for _, profile := range profiles {
+		restHost := endpointHost(profile.RESTEndpoint)
+		rpcHost := endpointHost(profile.RPCEndpoint)
+		if restHost == "" || rpcHost == "" {
+			continue
+		}
+		mapping[restHost] = rpcHost
+	}
+	for key, value := range overrides {
+		src := strings.ToLower(strings.TrimSpace(key))
+		dst := strings.ToLower(strings.TrimSpace(value))
+		if src == "" || dst == "" {
+			continue
+		}
+		mapping[src] = dst
+	}
+	return mapping
+}
+
+func buildRPCToRESTHostMapWithOverrides(profiles map[string]networkProfile, overrides map[string]string) map[string]string {
+	mapping := make(map[string]string, len(profiles)+len(overrides))
+	for _, profile := range profiles {
+		restHost := endpointHost(profile.RESTEndpoint)
+		rpcHost := endpointHost(profile.RPCEndpoint)
+		if restHost == "" || rpcHost == "" {
+			continue
+		}
+		mapping[rpcHost] = restHost
+	}
+	for key, value := range overrides {
+		src := strings.ToLower(strings.TrimSpace(key))
+		dst := strings.ToLower(strings.TrimSpace(value))
+		if src == "" || dst == "" {
+			continue
+		}
+		mapping[src] = dst
+	}
+	return mapping
 }
