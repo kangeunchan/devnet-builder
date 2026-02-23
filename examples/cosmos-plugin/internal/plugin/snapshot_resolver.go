@@ -3,7 +3,6 @@ package cosmos
 import (
 	"context"
 	"io"
-	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -17,19 +16,34 @@ var (
 )
 
 func resolveLatestPolkachuSnapshotURL(networkType string) string {
-	switch strings.TrimSpace(networkType) {
-	case "mainnet":
-		return fetchFirstMatchingSnapshotURL(mainnetSnapshotIndexURL, mainnetSnapshotURLPattern)
-	case "testnet":
-		return fetchFirstMatchingSnapshotURL(testnetSnapshotIndexURL, testnetSnapshotURLPattern)
+	return ResolveLatestPolkachuSnapshotURLWithClient(networkType, httpClient)
+}
+
+// ResolveLatestPolkachuSnapshotURLWithClient resolves the latest snapshot URL
+// from Polkachu index pages for the given network type using the provided HTTP client.
+// This is exported so unit tests outside this package can validate resolver behavior.
+func ResolveLatestPolkachuSnapshotURLWithClient(networkType string, client *http.Client) string {
+	profile, ok := networkProfileByType(networkType)
+	if !ok {
+		return ""
+	}
+
+	switch canonicalNetworkType(networkType) {
+	case networkMainnet:
+		return fetchFirstMatchingSnapshotURL(client, profile.SnapshotIndexURL, mainnetSnapshotURLPattern)
+	case networkTestnet:
+		return fetchFirstMatchingSnapshotURL(client, profile.SnapshotIndexURL, testnetSnapshotURLPattern)
 	default:
 		return ""
 	}
 }
 
-func fetchFirstMatchingSnapshotURL(indexURL string, urlPattern *regexp.Regexp) string {
+func fetchFirstMatchingSnapshotURL(client *http.Client, indexURL string, urlPattern *regexp.Regexp) string {
 	if strings.TrimSpace(indexURL) == "" || urlPattern == nil {
 		return ""
+	}
+	if client == nil {
+		client = httpClient
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), snapshotResolverTimeout)
@@ -37,37 +51,28 @@ func fetchFirstMatchingSnapshotURL(indexURL string, urlPattern *regexp.Regexp) s
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, indexURL, nil)
 	if err != nil {
-		logSnapshotResolverDebug("failed to build snapshot index request url=%q err=%v", indexURL, err)
 		return ""
 	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		logSnapshotResolverDebug("failed to fetch snapshot index url=%q err=%v", indexURL, err)
 		return ""
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		logSnapshotResolverDebug("snapshot index returned non-2xx url=%q status=%d", indexURL, resp.StatusCode)
 		return ""
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		logSnapshotResolverDebug("failed to read snapshot index body url=%q err=%v", indexURL, err)
 		return ""
 	}
 
 	match := urlPattern.Find(body)
 	if len(match) == 0 {
-		logSnapshotResolverDebug("snapshot link not found in index url=%q", indexURL)
 		return ""
 	}
 
 	return strings.TrimSpace(string(match))
-}
-
-func logSnapshotResolverDebug(format string, args ...any) {
-	log.Printf("[cosmos-plugin:snapshot] "+format, args...)
 }
