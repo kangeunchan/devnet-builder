@@ -1,100 +1,53 @@
 package unit
 
 import (
-	"io"
-	"net/http"
-	"strings"
+	"context"
+	"errors"
 	"testing"
 
-	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/internal/plugin"
+	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/plugin"
 )
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
-func TestResolveLatestPolkachuSnapshotURL_Mainnet(t *testing.T) {
-<<<<<<<< HEAD:examples/cosmos-plugin/internal/plugin/snapshot_resolver_test.go
-	originalClient := httpClient
-	t.Cleanup(func() {
-		httpClient = originalClient
-	})
-
-========
-	mainnetIndexURL := "https://www.polkachu.com/tendermint_snapshots/cosmos"
->>>>>>>> 0ac5198 (test(examples/cosmos-plugin): move snapshot url resolver tests to unit suite):examples/cosmos-plugin/test/unit/snapshot_url_resolver_test.go
-	mainnetHTML := `<html><body>
-	<a href="https://snapshots.polkachu.com/snapshots/cosmos/cosmos_30000001.tar.lz4">latest</a>
-	<a href="https://snapshots.polkachu.com/snapshots/cosmos/cosmos_29999999.tar.lz4">older</a>
-	</body></html>`
-
-	client := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-<<<<<<<< HEAD:examples/cosmos-plugin/internal/plugin/snapshot_resolver_test.go
-			if req.URL.String() != mainnetSnapshotIndexURL {
-========
-			if req.URL.String() != mainnetIndexURL {
->>>>>>>> 0ac5198 (test(examples/cosmos-plugin): move snapshot url resolver tests to unit suite):examples/cosmos-plugin/test/unit/snapshot_url_resolver_test.go
-				t.Fatalf("unexpected URL: %s", req.URL.String())
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(mainnetHTML)),
-				Header:     make(http.Header),
-			}, nil
-		}),
-	}
-
-	got := cosmos.ResolveLatestPolkachuSnapshotURLWithClient("mainnet", client)
-	want := "https://snapshots.polkachu.com/snapshots/cosmos/cosmos_30000001.tar.lz4"
-	if got != want {
-		t.Fatalf("ResolveLatestPolkachuSnapshotURLWithClient(mainnet) = %q, want %q", got, want)
-	}
-}
-
-func TestResolveLatestPolkachuSnapshotURL_TestnetAndNoMatch(t *testing.T) {
-	mainnetIndexURL := "https://www.polkachu.com/tendermint_snapshots/cosmos"
-	testnetIndexURL := "https://www.polkachu.com/testnets/cosmos/snapshots"
-
-<<<<<<<< HEAD:examples/cosmos-plugin/internal/plugin/snapshot_resolver_test.go
-	httpClient = &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			var body string
-			switch req.URL.String() {
-			case testnetSnapshotIndexURL:
-				body = `<a href="https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_16000000.tar.lz4">latest</a>`
-			case mainnetSnapshotIndexURL:
-========
-	client := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			var body string
-			switch req.URL.String() {
-			case testnetIndexURL:
-				body = `<a href="https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_16000000.tar.lz4">latest</a>`
-			case mainnetIndexURL:
->>>>>>>> 0ac5198 (test(examples/cosmos-plugin): move snapshot url resolver tests to unit suite):examples/cosmos-plugin/test/unit/snapshot_url_resolver_test.go
-				body = `<html><body>no snapshot links</body></html>`
+func TestSnapshotURL_UsesHookResolver(t *testing.T) {
+	networkModule := cosmos.New(cosmos.WithHooks(cosmos.Hooks{
+		SnapshotURLResolver: func(ctx context.Context, networkType string, profile cosmos.NetworkProfileConfig, cfg cosmos.Customization) (string, error) {
+			_ = ctx
+			_ = profile
+			_ = cfg
+			switch networkType {
+			case "mainnet":
+				return "https://snapshots.polkachu.com/snapshots/cosmos/cosmos_30000001.tar.lz4", nil
+			case "testnet":
+				return "https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_16000000.tar.lz4", nil
 			default:
-				body = ""
+				return "", nil
 			}
+		},
+	}))
 
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     make(http.Header),
-			}, nil
-		}),
+	if got := networkModule.SnapshotURL("mainnet"); got != "https://snapshots.polkachu.com/snapshots/cosmos/cosmos_30000001.tar.lz4" {
+		t.Fatalf("SnapshotURL(mainnet) = %q", got)
 	}
+	if got := networkModule.SnapshotURL("testnet"); got != "https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_16000000.tar.lz4" {
+		t.Fatalf("SnapshotURL(testnet) = %q", got)
+	}
+}
 
-	if got := cosmos.ResolveLatestPolkachuSnapshotURLWithClient("testnet", client); got != "https://snapshots.polkachu.com/testnet-snapshots/cosmos/cosmos_16000000.tar.lz4" {
-		t.Fatalf("ResolveLatestPolkachuSnapshotURLWithClient(testnet) = %q", got)
+func TestSnapshotURL_ReturnsEmptyOnResolverError(t *testing.T) {
+	networkModule := cosmos.New(cosmos.WithHooks(cosmos.Hooks{
+		SnapshotURLResolver: func(ctx context.Context, networkType string, profile cosmos.NetworkProfileConfig, cfg cosmos.Customization) (string, error) {
+			_ = ctx
+			_ = networkType
+			_ = profile
+			_ = cfg
+			return "", errors.New("resolver failed")
+		},
+	}))
+
+	if got := networkModule.SnapshotURL("mainnet"); got != "" {
+		t.Fatalf("SnapshotURL(mainnet) = %q, want empty", got)
 	}
-	if got := cosmos.ResolveLatestPolkachuSnapshotURLWithClient("mainnet", client); got != "" {
-		t.Fatalf("ResolveLatestPolkachuSnapshotURLWithClient(mainnet) = %q, want empty", got)
-	}
-	if got := cosmos.ResolveLatestPolkachuSnapshotURLWithClient("unknown", client); got != "" {
-		t.Fatalf("ResolveLatestPolkachuSnapshotURLWithClient(unknown) = %q, want empty", got)
+	if got := networkModule.SnapshotURL("unknown"); got != "" {
+		t.Fatalf("SnapshotURL(unknown) = %q, want empty", got)
 	}
 }
