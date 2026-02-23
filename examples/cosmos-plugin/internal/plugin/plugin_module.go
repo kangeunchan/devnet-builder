@@ -3,7 +3,7 @@ package cosmos
 import (
 	"context"
 	"fmt"
-	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,8 +12,22 @@ import (
 
 // CosmosNetwork implements network.Module for Cosmos Hub.
 type CosmosNetwork struct {
-	runCmd           commandRunnerFunc
-	snapshotResolver snapshotResolverFunc
+	runCmd commandRunnerFunc
+	hooks  Hooks
+
+	customizationFromFile   Customization
+	customizationFromOption Customization
+	customization           Customization
+
+	profiles         map[string]networkProfile
+	restToRPCHostMap map[string]string
+	rpcToRESTHostMap map[string]string
+
+	requestTimeout         time.Duration
+	waitBlockTimeout       time.Duration
+	snapshotResolveTimeout time.Duration
+
+	initErr error
 }
 
 // Option configures CosmosNetwork construction.
@@ -25,14 +39,16 @@ var _ network.FileBasedGenesisModifier = (*CosmosNetwork)(nil)
 // New creates a CosmosNetwork plugin module.
 func New(opts ...Option) *CosmosNetwork {
 	networkModule := &CosmosNetwork{
-		runCmd:           runCommand,
-		snapshotResolver: resolveLatestPolkachuSnapshotURL,
+		runCmd: runCommand,
 	}
+
 	for _, opt := range opts {
 		if opt != nil {
 			opt(networkModule)
 		}
 	}
+
+	networkModule.applyConfiguration()
 
 	return networkModule
 }
@@ -44,28 +60,6 @@ func WithCommandRunner(runner func(context.Context, string, ...string) ([]byte, 
 			return
 		}
 		n.runCmd = runner
-	}
-}
-
-// WithSnapshotResolver overrides snapshot URL resolution for this module instance.
-func WithSnapshotResolver(resolver func(networkType string) string) Option {
-	return func(n *CosmosNetwork) {
-		if resolver == nil {
-			return
-		}
-		n.snapshotResolver = func(ctx context.Context, networkType string) (string, error) {
-			return resolver(networkType), nil
-		}
-	}
-}
-
-// WithSnapshotHTTPClient allows tests to control snapshot index fetch behavior
-// without exposing internal resolver helpers.
-func WithSnapshotHTTPClient(client *http.Client) Option {
-	return func(n *CosmosNetwork) {
-		n.snapshotResolver = func(ctx context.Context, networkType string) (string, error) {
-			return resolveLatestPolkachuSnapshotURLWithClient(ctx, networkType, client)
-		}
 	}
 }
 
@@ -82,7 +76,7 @@ func (n *CosmosNetwork) DisplayName() string {
 }
 
 func (n *CosmosNetwork) Version() string {
-	return "1.1.0"
+	return "1.2.0"
 }
 
 // ============================================
@@ -90,6 +84,9 @@ func (n *CosmosNetwork) Version() string {
 // ============================================
 
 func (n *CosmosNetwork) BinaryName() string {
+	if v := strings.TrimSpace(n.customization.Runtime.BinaryName); v != "" {
+		return v
+	}
 	return "gaiad"
 }
 
@@ -161,6 +158,9 @@ func (n *CosmosNetwork) DefaultPorts() network.PortConfig {
 // ============================================
 
 func (n *CosmosNetwork) DockerImage() string {
+	if v := strings.TrimSpace(n.customization.Runtime.DockerImage); v != "" {
+		return v
+	}
 	return "ghcr.io/cosmos/gaia:" + n.DefaultBinaryVersion()
 }
 
@@ -172,6 +172,9 @@ func (n *CosmosNetwork) DockerImageTag(version string) string {
 }
 
 func (n *CosmosNetwork) DockerHomeDir() string {
+	if v := strings.TrimSpace(n.customization.Runtime.DockerHomeDir); v != "" {
+		return v
+	}
 	return "/home/gaia"
 }
 
@@ -180,6 +183,9 @@ func (n *CosmosNetwork) DockerHomeDir() string {
 // ============================================
 
 func (n *CosmosNetwork) DefaultNodeHome() string {
+	if v := strings.TrimSpace(n.customization.Runtime.DefaultHome); v != "" {
+		return v
+	}
 	return "/root/.gaia"
 }
 
@@ -205,7 +211,7 @@ func (n *CosmosNetwork) InitCommand(homeDir, chainID, moniker string) []string {
 
 func (n *CosmosNetwork) StartCommand(homeDir string, networkMode string) []string {
 	args := []string{"start", "--home", homeDir}
-	if profile, ok := networkProfileByType(networkMode); ok {
+	if profile, ok := n.networkProfileByType(networkMode); ok {
 		args = append(args, "--chain-id", profile.ChainID)
 	}
 	return args
@@ -216,12 +222,25 @@ func (n *CosmosNetwork) ExportCommand(homeDir string) []string {
 }
 
 func (n *CosmosNetwork) DefaultGeneratorConfig() network.GeneratorConfig {
+	validatorBalance := strings.TrimSpace(n.customization.Funding.ValidatorBalance)
+	if validatorBalance == "" {
+		validatorBalance = "1000000000000uatom"
+	}
+	accountBalance := strings.TrimSpace(n.customization.Funding.AccountBalance)
+	if accountBalance == "" {
+		accountBalance = "100000000000uatom"
+	}
+	validatorStake := strings.TrimSpace(n.customization.Funding.ValidatorStakeDefault)
+	if validatorStake == "" {
+		validatorStake = "100000000"
+	}
+
 	return network.GeneratorConfig{
 		NumValidators:    4,
 		NumAccounts:      10,
-		AccountBalance:   "100000000000uatom",
-		ValidatorBalance: "1000000000000uatom",
-		ValidatorStake:   "100000000",
+		AccountBalance:   accountBalance,
+		ValidatorBalance: validatorBalance,
+		ValidatorStake:   validatorStake,
 		OutputDir:        "./devnet",
 		ChainID:          "cosmosdevnet-1",
 	}
@@ -236,6 +255,9 @@ func (n *CosmosNetwork) GetCodec() ([]byte, error) {
 }
 
 func (n *CosmosNetwork) Validate() error {
+	if n.initErr != nil {
+		return n.initErr
+	}
 	if n.Name() == "" {
 		return fmt.Errorf("network name is required")
 	}
@@ -250,22 +272,36 @@ func (n *CosmosNetwork) Validate() error {
 // ============================================
 
 func (n *CosmosNetwork) SnapshotURL(networkType string) string {
-	if n.snapshotResolver == nil {
-		return ""
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), snapshotResolverTimeout)
-	defer cancel()
-
-	snapshotURL, err := n.snapshotResolver(ctx, networkType)
+	profile, err := n.requireNetworkProfile(networkType)
 	if err != nil {
 		return ""
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), n.snapshotResolveTimeout)
+	defer cancel()
+
+	profileCfg := NetworkProfileConfig{
+		ChainID:          profile.ChainID,
+		RPCEndpoint:      profile.RPCEndpoint,
+		RESTEndpoint:     profile.RESTEndpoint,
+		SnapshotIndexURL: profile.SnapshotIndexURL,
+	}
+
+	var snapshotURL string
+	if n.hooks.SnapshotURLResolver != nil {
+		snapshotURL, err = n.hooks.SnapshotURLResolver(ctx, canonicalNetworkType(networkType), profileCfg, n.customization)
+	} else {
+		snapshotURL, err = resolveLatestPolkachuSnapshotURL(ctx, canonicalNetworkType(networkType), profileCfg, n.customization.Snapshot)
+	}
+	if err != nil {
+		return ""
+	}
+
 	return strings.TrimSpace(snapshotURL)
 }
 
 func (n *CosmosNetwork) RPCEndpoint(networkType string) string {
-	if profile, ok := networkProfileByType(networkType); ok {
+	if profile, ok := n.networkProfileByType(networkType); ok {
 		return profile.RPCEndpoint
 	}
 	return ""
@@ -288,5 +324,31 @@ func (n *CosmosNetwork) RPCEndpoints(networkType string) []string {
 }
 
 func (n *CosmosNetwork) AvailableNetworks() []string {
-	return []string{networkMainnet, networkTestnet}
+	return availableNetworkTypes(n.profiles)
+}
+
+func availableNetworkTypes(profiles map[string]networkProfile) []string {
+	if len(profiles) == 0 {
+		return []string{networkMainnet, networkTestnet}
+	}
+
+	out := make([]string, 0, len(profiles))
+	if _, ok := profiles[networkMainnet]; ok {
+		out = append(out, networkMainnet)
+	}
+	if _, ok := profiles[networkTestnet]; ok {
+		out = append(out, networkTestnet)
+	}
+
+	extras := make([]string, 0, len(profiles))
+	for key := range profiles {
+		if key == networkMainnet || key == networkTestnet {
+			continue
+		}
+		extras = append(extras, key)
+	}
+	sort.Strings(extras)
+	out = append(out, extras...)
+
+	return out
 }
