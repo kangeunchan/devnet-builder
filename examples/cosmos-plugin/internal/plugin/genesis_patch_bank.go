@@ -21,30 +21,13 @@ func (n *CosmosNetwork) patchBankModule(
 	cfg network.GenesisConfig,
 	addAccounts []network.GenesisAccountInfo,
 ) error {
-	defaultFunding := parseAmountIntOrZero("1000000000")
-	validatorFunding, _ := parseCoinAmountWithFallback(n.DefaultGeneratorConfig().ValidatorBalance, cfg.BaseDenom, defaultFunding)
-	accountFunding, _ := parseCoinAmountWithFallback(n.DefaultGeneratorConfig().AccountBalance, cfg.BaseDenom, defaultFunding)
-	targets := make(map[string]sdkmath.Int, len(validatorAccounts))
-	for _, addr := range validatorAccounts {
-		targets[addr] = validatorFunding
-	}
-	for _, account := range addAccounts {
-		addr := strings.TrimSpace(account.Address)
-		if addr == "" {
-			continue
-		}
-		amount, fallbackUsed := parseCoinAmountWithFallback(account.Balance, cfg.BaseDenom, accountFunding)
-		if fallbackUsed && strings.TrimSpace(account.Balance) != "" && n.invalidBalancePolicy() == invalidBalancePolicyError {
-			return fmt.Errorf("invalid account balance for %q: %q", addr, account.Balance)
-		}
-		if current, ok := targets[addr]; !ok || current.LT(amount) {
-			targets[addr] = amount
-		}
-	}
-
 	moduleAddrs := map[string]string{}
 	if auth != nil {
 		moduleAddrs = genesisinternal.CollectModuleAccountAddresses(auth)
+	}
+	targets, err := n.buildBankFundingTargets(validatorAccounts, addAccounts, bondedTotal, moduleAddrs, cfg.BaseDenom)
+	if err != nil {
+		return err
 	}
 
 	balances, _ := asSlice(bank["balances"])
@@ -67,4 +50,48 @@ func (n *CosmosNetwork) patchBankModule(
 	bank["balances"] = balances
 	bank["supply"] = genesisinternal.RecomputeSupplyFromBalances(balances)
 	return nil
+}
+
+func (n *CosmosNetwork) buildBankFundingTargets(
+	validatorAccounts []string,
+	addAccounts []network.GenesisAccountInfo,
+	bondedTotal sdkmath.Int,
+	moduleAddrs map[string]string,
+	baseDenom string,
+) (map[string]sdkmath.Int, error) {
+	defaultFunding := parseAmountIntOrZero("1000000000")
+	validatorFunding, _ := parseCoinAmountWithFallback(n.DefaultGeneratorConfig().ValidatorBalance, baseDenom, defaultFunding)
+	accountFunding, _ := parseCoinAmountWithFallback(n.DefaultGeneratorConfig().AccountBalance, baseDenom, defaultFunding)
+
+	targets := make(map[string]sdkmath.Int, len(validatorAccounts)+len(addAccounts)+2)
+	for _, addr := range validatorAccounts {
+		trimmed := strings.TrimSpace(addr)
+		if trimmed == "" {
+			continue
+		}
+		targets[trimmed] = validatorFunding
+	}
+
+	for _, account := range addAccounts {
+		addr := strings.TrimSpace(account.Address)
+		if addr == "" {
+			continue
+		}
+		amount, fallbackUsed := parseCoinAmountWithFallback(account.Balance, baseDenom, accountFunding)
+		if fallbackUsed && strings.TrimSpace(account.Balance) != "" && n.invalidBalancePolicy() == invalidBalancePolicyError {
+			return nil, fmt.Errorf("invalid account balance for %q: %q", addr, account.Balance)
+		}
+		if current, ok := targets[addr]; !ok || current.LT(amount) {
+			targets[addr] = amount
+		}
+	}
+
+	if bondedAddr := strings.TrimSpace(moduleAddrs["bonded_tokens_pool"]); bondedAddr != "" {
+		targets[bondedAddr] = bondedTotal
+	}
+	if notBondedAddr := strings.TrimSpace(moduleAddrs["not_bonded_tokens_pool"]); notBondedAddr != "" {
+		targets[notBondedAddr] = sdkmath.ZeroInt()
+	}
+
+	return targets, nil
 }

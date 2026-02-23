@@ -2,6 +2,7 @@ package genesis
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 )
 
@@ -60,4 +61,101 @@ func EnsureMap(in map[string]any) map[string]any {
 		return map[string]any{}
 	}
 	return in
+}
+
+// CopyJSONValue streams one JSON value from decoder to writer without buffering
+// the full value into a single RawMessage.
+func CopyJSONValue(dec *json.Decoder, w io.Writer) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	return writeTokenValue(dec, w, tok)
+}
+
+// SkipJSONValue discards one JSON value from decoder without buffering the full
+// value into a single RawMessage.
+func SkipJSONValue(dec *json.Decoder) error {
+	return CopyJSONValue(dec, io.Discard)
+}
+
+func writeTokenValue(dec *json.Decoder, w io.Writer, tok json.Token) error {
+	switch t := tok.(type) {
+	case json.Delim:
+		switch t {
+		case '{':
+			if _, err := io.WriteString(w, "{"); err != nil {
+				return err
+			}
+
+			first := true
+			for dec.More() {
+				keyTok, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyTok.(string)
+				if !ok {
+					return fmt.Errorf("object key token must be string, got %T", keyTok)
+				}
+				if err := WriteObjectKey(w, &first, key); err != nil {
+					return err
+				}
+				if err := CopyJSONValue(dec, w); err != nil {
+					return err
+				}
+			}
+
+			endTok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			endDelim, ok := endTok.(json.Delim)
+			if !ok || endDelim != '}' {
+				return fmt.Errorf("expected object terminator, got %T %v", endTok, endTok)
+			}
+
+			_, err = io.WriteString(w, "}")
+			return err
+		case '[':
+			if _, err := io.WriteString(w, "["); err != nil {
+				return err
+			}
+
+			first := true
+			for dec.More() {
+				if !first {
+					if _, err := io.WriteString(w, ","); err != nil {
+						return err
+					}
+				}
+				first = false
+
+				if err := CopyJSONValue(dec, w); err != nil {
+					return err
+				}
+			}
+
+			endTok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			endDelim, ok := endTok.(json.Delim)
+			if !ok || endDelim != ']' {
+				return fmt.Errorf("expected array terminator, got %T %v", endTok, endTok)
+			}
+
+			_, err = io.WriteString(w, "]")
+			return err
+		default:
+			return fmt.Errorf("unsupported delimiter %q", t)
+		}
+	default:
+		b, err := json.Marshal(tok)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(b)
+		return err
+	}
 }

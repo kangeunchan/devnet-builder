@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 
 	genesisinternal "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/internal/plugin/genesis"
 	"github.com/altuslabsxyz/devnet-builder/pkg/network"
@@ -138,6 +139,7 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 
 	var authModule map[string]any
 	var deferredBank map[string]any
+	var deferredBankPath string
 	hasDeferredBank := false
 
 	for dec.More() {
@@ -222,11 +224,36 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 				return err
 			}
 		case appModuleBank:
-			module, err := decodeModuleObject(dec, appModuleBank)
-			if err != nil {
-				return err
+			if len(n.hooks.AdditionalGenesisMutators) > 0 {
+				module, err := decodeModuleObject(dec, appModuleBank)
+				if err != nil {
+					return err
+				}
+				deferredBank = module
+				hasDeferredBank = true
+				continue
 			}
-			deferredBank = module
+
+			tmpFile, err := os.CreateTemp("", "cosmos-bank-module-*.json")
+			if err != nil {
+				return fmt.Errorf("failed to create deferred bank temp file: %w", err)
+			}
+
+			tmpPath := tmpFile.Name()
+			if err := genesisinternal.CopyJSONValue(dec, tmpFile); err != nil {
+				_ = tmpFile.Close()
+				_ = os.Remove(tmpPath)
+				return fmt.Errorf("failed to stream deferred bank module to temp file: %w", err)
+			}
+			if err := tmpFile.Close(); err != nil {
+				_ = os.Remove(tmpPath)
+				return fmt.Errorf("failed to close deferred bank temp file: %w", err)
+			}
+
+			if deferredBankPath != "" {
+				_ = os.Remove(deferredBankPath)
+			}
+			deferredBankPath = tmpPath
 			hasDeferredBank = true
 		case appModuleGenutil:
 			module, err := decodeModuleObject(dec, appModuleGenutil)
@@ -252,17 +279,33 @@ func (n *CosmosNetwork) streamModifyAppState(dec *json.Decoder, w io.Writer, opt
 	}
 
 	if hasDeferredBank {
-		if err := n.patchBankModule(deferredBank, authModule, validatorAccounts, bondedTotal, cfg, opts.AddAccounts); err != nil {
-			return fmt.Errorf("failed to patch %s module: %w", appModuleBank, err)
-		}
-		if err := n.applyAdditionalGenesisMutators(appModuleBank, deferredBank, opts, cfg); err != nil {
-			return err
-		}
-		if err := genesisinternal.WriteObjectKey(w, &first, appModuleBank); err != nil {
-			return err
-		}
-		if err := genesisinternal.WriteJSONValue(w, deferredBank); err != nil {
-			return fmt.Errorf("failed to write %s module: %w", appModuleBank, err)
+		if deferredBank != nil {
+			if err := n.patchBankModule(deferredBank, authModule, validatorAccounts, bondedTotal, cfg, opts.AddAccounts); err != nil {
+				return fmt.Errorf("failed to patch %s module: %w", appModuleBank, err)
+			}
+			if err := n.applyAdditionalGenesisMutators(appModuleBank, deferredBank, opts, cfg); err != nil {
+				return err
+			}
+			if err := genesisinternal.WriteObjectKey(w, &first, appModuleBank); err != nil {
+				return err
+			}
+			if err := genesisinternal.WriteJSONValue(w, deferredBank); err != nil {
+				return fmt.Errorf("failed to write %s module: %w", appModuleBank, err)
+			}
+		} else if deferredBankPath != "" {
+			defer os.Remove(deferredBankPath)
+			if err := n.streamPatchDeferredBankModule(
+				deferredBankPath,
+				w,
+				&first,
+				authModule,
+				validatorAccounts,
+				bondedTotal,
+				opts,
+				cfg,
+			); err != nil {
+				return fmt.Errorf("failed to stream-patch %s module: %w", appModuleBank, err)
+			}
 		}
 	}
 

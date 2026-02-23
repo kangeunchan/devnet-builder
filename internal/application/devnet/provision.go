@@ -929,11 +929,25 @@ func (uc *ProvisionUseCase) modifyGenesisViaFile(ctx context.Context, genesis []
 	// Define output path
 	outputPath := filepath.Join(tmpDir, "genesis_output.json")
 
+	// Show file-size-based progress while plugin writes the modified genesis.
+	// This keeps memory stable and gives feedback for multi-GB file-based mutation.
+	stopSpinnerIfSupported(uc.logger)
+	stopProgress := streamFileProgress(
+		ctx,
+		uc.logger,
+		"Patching genesis",
+		outputPath,
+		int64(len(genesis)),
+		time.Second,
+	)
+	defer stopProgress()
+
 	// Call file-based modification via plugin
 	outputSize, err := fileModifier.ModifyGenesisFile(inputPath, outputPath, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to modify genesis via file: %w", err)
 	}
+	stopProgress()
 	uc.logger.Debug("Genesis modified via file (output size: %d bytes)", outputSize)
 
 	// Read modified genesis
