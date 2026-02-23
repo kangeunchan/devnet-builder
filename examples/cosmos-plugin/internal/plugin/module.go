@@ -210,11 +210,10 @@ func (n *CosmosNetwork) InitCommand(homeDir, chainID, moniker string) []string {
 }
 
 func (n *CosmosNetwork) StartCommand(homeDir string, networkMode string) []string {
-	args := []string{"start", "--home", homeDir}
-	if profile, ok := n.networkProfileByType(networkMode); ok {
-		args = append(args, "--chain-id", profile.ChainID)
-	}
-	return args
+	// Disable fastnode migration by default for forked large-state devnets.
+	// This avoids known startup failures during IAVL fastnode upgrade on exported state.
+	// Force pebbledb for large forked-state startup stability (goleveldb+snappy can panic on huge states).
+	return []string{"start", "--home", homeDir, "--iavl-disable-fastnode", "--db_backend=pebbledb"}
 }
 
 func (n *CosmosNetwork) ExportCommand(homeDir string) []string {

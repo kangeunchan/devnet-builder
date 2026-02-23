@@ -6,32 +6,23 @@ import (
 	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/plugin"
 )
 
-func TestStartCommand_UsesNetworkChainID(t *testing.T) {
+func TestStartCommand_UsesHomeOnly(t *testing.T) {
 	networkModule := cosmos.New()
 
 	mainnet := networkModule.StartCommand("/tmp/node0", "mainnet")
-	if !containsArgPair(mainnet, "--chain-id", "cosmoshub-4") {
-		t.Fatalf("expected mainnet start command to include cosmoshub-4 chain-id, got %v", mainnet)
+	if len(mainnet) != 5 || mainnet[0] != "start" || mainnet[1] != "--home" || mainnet[2] != "/tmp/node0" || mainnet[3] != "--iavl-disable-fastnode" || mainnet[4] != "--db_backend=pebbledb" {
+		t.Fatalf("expected mainnet start command to be [start --home /tmp/node0 --iavl-disable-fastnode --db_backend=pebbledb], got %v", mainnet)
 	}
 
 	testnet := networkModule.StartCommand("/tmp/node0", "testnet")
-	if !containsArgPair(testnet, "--chain-id", "provider") {
-		t.Fatalf("expected testnet start command to include provider chain-id, got %v", testnet)
+	if len(testnet) != 5 || testnet[0] != "start" || testnet[1] != "--home" || testnet[2] != "/tmp/node0" || testnet[3] != "--iavl-disable-fastnode" || testnet[4] != "--db_backend=pebbledb" {
+		t.Fatalf("expected testnet start command to be [start --home /tmp/node0 --iavl-disable-fastnode --db_backend=pebbledb], got %v", testnet)
 	}
 
 	unknown := networkModule.StartCommand("/tmp/node0", "")
-	if containsArg(unknown, "--chain-id") {
-		t.Fatalf("expected default start command without chain-id override, got %v", unknown)
+	if len(unknown) != 5 || unknown[0] != "start" || unknown[1] != "--home" || unknown[2] != "/tmp/node0" || unknown[3] != "--iavl-disable-fastnode" || unknown[4] != "--db_backend=pebbledb" {
+		t.Fatalf("expected default start command to be [start --home /tmp/node0 --iavl-disable-fastnode --db_backend=pebbledb], got %v", unknown)
 	}
-}
-
-func containsArg(args []string, value string) bool {
-	for _, arg := range args {
-		if arg == value {
-			return true
-		}
-	}
-	return false
 }
 
 func containsArgPair(args []string, key string, value string) bool {

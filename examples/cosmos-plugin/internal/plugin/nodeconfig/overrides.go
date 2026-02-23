@@ -32,7 +32,8 @@ func (b Builder) Build(nodeIndex int, opts network.NodeConfigOptions) ([]byte, [
 
 func buildConfigTomlOverrides(moniker string, opts network.NodeConfigOptions) ([]byte, error) {
 	data := map[string]any{
-		"moniker": moniker,
+		"moniker":    moniker,
+		"db_backend": "pebbledb",
 		"rpc": map[string]any{
 			"laddr": tcpListenAddress("0.0.0.0", opts.Ports.RPC),
 		},

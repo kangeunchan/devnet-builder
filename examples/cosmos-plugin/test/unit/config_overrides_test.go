@@ -34,6 +34,9 @@ func TestGetConfigOverrides_UsesDefaults(t *testing.T) {
 	if got := configMap["moniker"]; got != "node2" {
 		t.Fatalf("expected fallback moniker node2, got: %v", got)
 	}
+	if got := configMap["db_backend"]; got != "pebbledb" {
+		t.Fatalf("expected db_backend=pebbledb, got: %v", got)
+	}
 	configP2P, _ := asMap(configMap["p2p"])
 	if got := configP2P["persistent_peers"]; got != "peer1@127.0.0.1:26656" {
 		t.Fatalf("expected persistent peers, got: %v", got)
