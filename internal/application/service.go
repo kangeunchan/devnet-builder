@@ -516,9 +516,6 @@ func (s *DevnetService) StartNode(ctx context.Context, nodeIndex int) (*dto.Node
 		}
 
 		args := networkModule.StartCommand(containerHome, metadata.NetworkName)
-		if metadata.ChainID != "" && !commandHasFlag(args, "--chain-id") {
-			args = append(args, "--chain-id", metadata.ChainID)
-		}
 
 		containerName := fmt.Sprintf("%s-devnet-node%d", normalizeContainerNetworkName(metadata.BlockchainNetwork), nodeIndex)
 		if err := dockerExec.RemoveContainer(ctx, containerName, true); err != nil {
@@ -564,9 +561,10 @@ func (s *DevnetService) StartNode(ctx context.Context, nodeIndex int) (*dto.Node
 		}
 	} else {
 		// Build start command
-		// Pass empty networkMode since chain-id is explicitly appended below
 		args := networkModule.StartCommand(node.HomeDir, "")
-		args = append(args, "--chain-id", node.ChainID)
+		if node.ChainID != "" {
+			args = append(args, "--chain-id", node.ChainID)
+		}
 
 		cmd := ports.Command{
 			Binary:  networkModule.BinaryName(),
@@ -711,15 +709,6 @@ func (s *DevnetService) StopNode(ctx context.Context, nodeIndex int, timeout tim
 		PreviousState: "running",
 		CurrentState:  "stopped",
 	}, nil
-}
-
-func commandHasFlag(args []string, flag string) bool {
-	for _, arg := range args {
-		if arg == flag {
-			return true
-		}
-	}
-	return false
 }
 
 // cleanPIDHandle implements ports.ProcessHandle for stopping by PID.

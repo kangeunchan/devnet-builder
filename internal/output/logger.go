@@ -66,6 +66,13 @@ func (l *Logger) SetAutoSpinner(enabled bool) {
 	}
 }
 
+// AutoSpinnerEnabled returns whether auto spinner mode is enabled.
+func (l *Logger) AutoSpinnerEnabled() bool {
+	l.spinnerMu.Lock()
+	defer l.spinnerMu.Unlock()
+	return l.autoSpinner
+}
+
 // Info prints an informational message in default color.
 // If autoSpinner is enabled, a spinner will be shown after the message.
 func (l *Logger) Info(format string, args ...interface{}) {

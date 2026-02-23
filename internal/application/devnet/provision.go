@@ -935,7 +935,7 @@ func (uc *ProvisionUseCase) modifyGenesisViaFile(ctx context.Context, genesis []
 	stopProgress := streamFileProgress(
 		ctx,
 		uc.logger,
-		"Patching genesis",
+		"",
 		int64(len(genesis)),
 		time.Second,
 		outputPath+".tmp",

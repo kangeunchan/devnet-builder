@@ -179,10 +179,6 @@ func (uc *RunUseCase) startDockerNode(ctx context.Context, node *ports.NodeMetad
 		args = uc.networkModule.StartCommand(containerHome, metadata.NetworkName)
 	}
 
-	if metadata.ChainID != "" && !containsArg(args, "--chain-id") {
-		args = append(args, "--chain-id", metadata.ChainID)
-	}
-
 	containerName := dockerContainerName(metadata.BlockchainNetwork, node.Index)
 	if removeErr := dockerExec.RemoveContainer(ctx, containerName, true); removeErr != nil {
 		uc.logger.Debug("Failed to remove existing container %s: %v", containerName, removeErr)
@@ -220,16 +216,16 @@ func (uc *RunUseCase) buildStartCommand(node *ports.NodeMetadata, metadata *port
 	}
 
 	// Build start command args
-	// Pass empty networkMode since chain-id is explicitly appended below
 	var args []string
 	if uc.networkModule != nil {
 		args = uc.networkModule.StartCommand(node.HomeDir, "")
 	} else {
 		// Fallback: standard cosmos start command
 		args = []string{"start", "--home", node.HomeDir}
+		if metadata.ChainID != "" {
+			args = append(args, "--chain-id", metadata.ChainID)
+		}
 	}
-
-	args = append(args, "--chain-id", metadata.ChainID)
 
 	// Determine log and PID file names
 	logFileName := "node.log"
@@ -246,15 +242,6 @@ func (uc *RunUseCase) buildStartCommand(node *ports.NodeMetadata, metadata *port
 		LogPath: fmt.Sprintf("%s/%s", node.HomeDir, logFileName),
 		PIDPath: fmt.Sprintf("%s/%s", node.HomeDir, pidFileName),
 	}
-}
-
-func containsArg(args []string, key string) bool {
-	for _, arg := range args {
-		if arg == key {
-			return true
-		}
-	}
-	return false
 }
 
 func (uc *RunUseCase) waitForHealth(ctx context.Context, nodes []*ports.NodeMetadata, timeout time.Duration) error {
