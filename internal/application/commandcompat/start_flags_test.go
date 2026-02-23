@@ -47,6 +47,25 @@ Flags:
 	}
 }
 
+func TestFilterDockerStartArgs_KeepsSupportedUnderscoreFlags(t *testing.T) {
+	resetStartFlagCaches(t)
+	runCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return []byte(`Usage:
+  gaiad start [flags]
+
+Flags:
+      --home string
+      --db_backend string
+`), nil
+	}
+
+	args := []string{"start", "--home", "/data", "--db_backend=pebbledb"}
+	got := FilterDockerStartArgs(context.Background(), "ghcr.io/cosmos/gaia:v25.3.2", "gaiad", args, nil)
+	if !reflect.DeepEqual(got, args) {
+		t.Fatalf("unexpected filtered args: got=%v want=%v", got, args)
+	}
+}
+
 func TestFilterDockerStartArgs_UsesProbeCache(t *testing.T) {
 	resetStartFlagCaches(t)
 
