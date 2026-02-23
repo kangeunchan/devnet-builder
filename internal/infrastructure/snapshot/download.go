@@ -198,12 +198,21 @@ func downloadFile(
 	progress ports.ProgressReporter,
 	parallelConnectionsOpt int,
 ) error {
-	unlock := lockDownloadPath(destPath)
+	unlock, waitedForLock := lockDownloadPath(destPath)
 	defer unlock()
+	if waitedForLock && logger != nil {
+		logger.Debug(
+			"another download is already in progress for %s; waiting on download lock",
+			destPath,
+		)
+	}
 
 	ctx, cancel := withDefaultDownloadTimeout(ctx)
 	defer cancel()
 
+	// Temporary file policy:
+	// - ".tmp" stores in-progress bytes for resume support.
+	// - per-destination lock prevents concurrent writers from corrupting .tmp state.
 	tmpPath := destPath + ".tmp"
 	resumeOffset, err := partialFileSize(tmpPath)
 	if err != nil {
@@ -215,6 +224,12 @@ func downloadFile(
 	}
 
 	parallelConnections := resolveParallelConnections(parallelConnectionsOpt)
+	if resumeOffset > 0 && parallelConnections > 1 && logger != nil {
+		logger.Debug(
+			"partial snapshot detected (%d bytes); resume mode uses a single connection for consistency",
+			resumeOffset,
+		)
+	}
 	if resumeOffset == 0 && parallelConnections > 1 {
 		parallelAttempt, parallelErr := tryParallelDownload(
 			ctx,
@@ -230,7 +245,11 @@ func downloadFile(
 				return finalizeDownloadFile(tmpPath, destPath)
 			}
 			if logger != nil {
-				logger.Warn("Parallel download failed, falling back to single connection: %v", parallelErr)
+				logger.Warn(
+					"Parallel download failed after %d bytes, falling back to single connection: %v",
+					parallelAttempt.Downloaded,
+					parallelErr,
+				)
 			}
 			if removeErr := os.Remove(tmpPath); removeErr != nil && !os.IsNotExist(removeErr) {
 				return fmt.Errorf("failed to clean temporary file after parallel attempt: %w", removeErr)
@@ -543,11 +562,14 @@ func newDownloadTransport() *http.Transport {
 	}
 }
 
-func lockDownloadPath(path string) func() {
+func lockDownloadPath(path string) (func(), bool) {
 	lock, _ := downloadPathLocks.LoadOrStore(path, &sync.Mutex{})
 	mu := lock.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	waited := !mu.TryLock()
+	if waited {
+		mu.Lock()
+	}
+	return mu.Unlock, waited
 }
 
 type probeResult struct {

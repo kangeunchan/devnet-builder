@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
@@ -23,6 +24,12 @@ type Adapter struct {
 	logger    *output.Logger
 	exporter  pkgNetwork.StateExporter      // Optional: network-specific exporter from plugin
 	binaryCmd func(homeDir string) []string // Default export command builder
+}
+
+var dockerExportProbeCache sync.Map
+var stateExportRunCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	return cmd.CombinedOutput()
 }
 
 // NewAdapter creates a new StateExportAdapter.
@@ -151,8 +158,7 @@ func (a *Adapter) runExportCommand(ctx context.Context, opts ports.StateExportOp
 	if path := strings.TrimSpace(opts.BinaryPath); path != "" {
 		a.logger.Info("Exporting genesis from snapshot... Running: %s %v", path, cmdArgs)
 
-		cmd := exec.CommandContext(ctx, path, cmdArgs...)
-		output, err := cmd.CombinedOutput()
+		output, err := stateExportRunCommand(ctx, path, cmdArgs...)
 		if err != nil {
 			return nil, &StateExportError{
 				Operation: "export",
@@ -179,6 +185,12 @@ func (a *Adapter) runExportCommand(ctx context.Context, opts ports.StateExportOp
 	if binaryName == "" {
 		binaryName = inferBinaryFromDockerImage(image)
 	}
+	if err := probeDockerExportCommandHelp(ctx, image, binaryName); err != nil {
+		return nil, &StateExportError{
+			Operation: "export_probe",
+			Message:   err.Error(),
+		}
+	}
 
 	uid := os.Getuid()
 	gid := os.Getgid()
@@ -195,8 +207,7 @@ func (a *Adapter) runExportCommand(ctx context.Context, opts ports.StateExportOp
 
 	a.logger.Info("Exporting genesis from snapshot... Running: docker %v", args)
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	output, err := cmd.CombinedOutput()
+	output, err := stateExportRunCommand(ctx, "docker", args...)
 	if err != nil {
 		return nil, &StateExportError{
 			Operation: "export",
@@ -205,6 +216,54 @@ func (a *Adapter) runExportCommand(ctx context.Context, opts ports.StateExportOp
 	}
 
 	return output, nil
+}
+
+type dockerExportProbeResult struct {
+	err error
+}
+
+func probeDockerExportCommandHelp(ctx context.Context, image, entrypoint string) error {
+	key := strings.TrimSpace(image) + "|" + strings.TrimSpace(entrypoint)
+	if cached, ok := dockerExportProbeCache.Load(key); ok {
+		return cached.(*dockerExportProbeResult).err
+	}
+
+	probeErr := runDockerExportHelpProbe(ctx, image, entrypoint)
+	entry := &dockerExportProbeResult{err: probeErr}
+	actual, loaded := dockerExportProbeCache.LoadOrStore(key, entry)
+	if loaded {
+		return actual.(*dockerExportProbeResult).err
+	}
+	return entry.err
+}
+
+func runDockerExportHelpProbe(ctx context.Context, image, entrypoint string) error {
+	probeCtx := ctx
+	cancel := func() {}
+	if ctx == nil {
+		probeCtx, cancel = context.WithTimeout(context.Background(), 20*time.Second)
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		probeCtx, cancel = context.WithTimeout(ctx, 20*time.Second)
+	}
+	defer cancel()
+
+	args := []string{"run", "--rm"}
+	if strings.TrimSpace(entrypoint) != "" {
+		args = append(args, "--entrypoint", entrypoint)
+	}
+	args = append(args, image, "export", "--help")
+
+	output, err := stateExportRunCommand(probeCtx, "docker", args...)
+	if err != nil {
+		return fmt.Errorf(
+			"docker export compatibility check failed (image=%s entrypoint=%s command=export --help): %w\noutput: %s",
+			image,
+			entrypoint,
+			err,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	return nil
 }
 
 func rewriteHomeDirArgsForDocker(args []string, hostHome, containerHome string) []string {

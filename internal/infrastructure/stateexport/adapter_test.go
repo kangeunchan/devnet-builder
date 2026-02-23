@@ -1,7 +1,11 @@
 package stateexport
 
 import (
+	"context"
+	"errors"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -68,4 +72,60 @@ func TestRewriteHomeDirArgsForDocker(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProbeDockerExportCommandHelp_UsesCache(t *testing.T) {
+	resetDockerExportProbeState(t)
+
+	callCount := 0
+	stateExportRunCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		callCount++
+		return []byte("ok"), nil
+	}
+
+	if err := probeDockerExportCommandHelp(context.Background(), "ghcr.io/cosmos/gaia:v25.3.2", "gaiad"); err != nil {
+		t.Fatalf("unexpected probe error: %v", err)
+	}
+	if err := probeDockerExportCommandHelp(context.Background(), "ghcr.io/cosmos/gaia:v25.3.2", "gaiad"); err != nil {
+		t.Fatalf("unexpected probe error on cached call: %v", err)
+	}
+
+	if callCount != 1 {
+		t.Fatalf("expected one probe command due to cache, got %d", callCount)
+	}
+}
+
+func TestProbeDockerExportCommandHelp_ErrorIncludesProbeContext(t *testing.T) {
+	resetDockerExportProbeState(t)
+
+	stateExportRunCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return []byte("permission denied"), errors.New("exit status 1")
+	}
+
+	err := probeDockerExportCommandHelp(context.Background(), "ghcr.io/cosmos/gaia:v25.3.2", "gaiad")
+	if err == nil {
+		t.Fatalf("expected probe error")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "image=ghcr.io/cosmos/gaia:v25.3.2") {
+		t.Fatalf("missing image context in error: %v", err)
+	}
+	if !strings.Contains(message, "entrypoint=gaiad") {
+		t.Fatalf("missing entrypoint context in error: %v", err)
+	}
+	if !strings.Contains(message, "command=export --help") {
+		t.Fatalf("missing command context in error: %v", err)
+	}
+}
+
+func resetDockerExportProbeState(t *testing.T) {
+	t.Helper()
+
+	oldRunCommand := stateExportRunCommand
+	dockerExportProbeCache = sync.Map{}
+
+	t.Cleanup(func() {
+		stateExportRunCommand = oldRunCommand
+		dockerExportProbeCache = sync.Map{}
+	})
 }

@@ -231,11 +231,21 @@ func (f *FetcherAdapter) FetchFromRPC(ctx context.Context, endpoint string) ([]b
 func (f *FetcherAdapter) fetchGenesisFromRPC(ctx context.Context, rpcEndpoint, destPath string) error {
 	genesis, directErr := f.fetchGenesisDirect(ctx, rpcEndpoint)
 	if directErr != nil {
-		f.logger.Debug("Direct /genesis fetch failed (%v), trying /genesis_chunked fallback", directErr)
+		f.logger.Debug(
+			"genesis fetch fallback: endpoint=%s stage=direct error=%v",
+			rpcEndpoint,
+			directErr,
+		)
 		chunkedGenesis, chunkedErr := f.fetchGenesisChunked(ctx, rpcEndpoint)
 		if chunkedErr != nil {
-			return fmt.Errorf("direct /genesis failed: %w; /genesis_chunked fallback failed: %v", directErr, chunkedErr)
+			return fmt.Errorf(
+				"endpoint=%s direct /genesis failed: %w; /genesis_chunked fallback failed: %v",
+				rpcEndpoint,
+				directErr,
+				chunkedErr,
+			)
 		}
+		f.logger.Debug("genesis fetch fallback: endpoint=%s stage=chunked result=success", rpcEndpoint)
 		genesis = chunkedGenesis
 	}
 
@@ -300,6 +310,11 @@ func (f *FetcherAdapter) fetchGenesisChunked(ctx context.Context, rpcEndpoint st
 	if first.Total <= 0 {
 		return nil, fmt.Errorf("invalid genesis_chunked total: %d", first.Total)
 	}
+	f.logger.Debug(
+		"genesis_chunked assembly: endpoint=%s total_chunks=%d",
+		rpcEndpoint,
+		first.Total,
+	)
 
 	decodedFirst, err := base64.StdEncoding.DecodeString(first.Data)
 	if err != nil {

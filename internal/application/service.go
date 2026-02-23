@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/altuslabsxyz/devnet-builder/internal/application/commandcompat"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	"github.com/altuslabsxyz/devnet-builder/internal/di"
@@ -170,22 +171,8 @@ func (s *DevnetService) GetStatus(ctx context.Context) (*dto.StatusOutput, error
 		return nil, err
 	}
 
-	// Determine overall status
-	overallStatus := string(metadata.Status)
-	runningCount := 0
-	for _, h := range health.Nodes {
-		if h.IsRunning {
-			runningCount++
-		}
-	}
-
-	if runningCount == metadata.NumValidators {
-		overallStatus = "running"
-	} else if runningCount > 0 {
-		overallStatus = "partial"
-	} else {
-		overallStatus = "stopped"
-	}
+	// Determine overall status from live health first, then fallback to metadata.
+	overallStatus := deriveOverallStatusFromHealth(health, metadata)
 
 	// Build DevnetInfo from metadata
 	devnetInfo := &dto.DevnetInfo{
@@ -199,7 +186,7 @@ func (s *DevnetService) GetStatus(ctx context.Context) (*dto.StatusOutput, error
 		NumAccounts:       metadata.NumAccounts,
 		InitialVersion:    metadata.InitialVersion,
 		CurrentVersion:    metadata.CurrentVersion,
-		Status:            string(metadata.Status),
+		Status:            overallStatus,
 		CreatedAt:         metadata.CreatedAt,
 	}
 
@@ -214,8 +201,8 @@ func (s *DevnetService) GetStatus(ctx context.Context) (*dto.StatusOutput, error
 			HomeDir: n.HomeDir,
 			NodeID:  n.NodeID,
 			Ports:   n.Ports,
-			RPCURL:  fmt.Sprintf("http://127.0.0.1:%d", n.Ports.RPC),
-			EVMURL:  fmt.Sprintf("http://127.0.0.1:%d", n.Ports.EVMRPC),
+			RPCURL:  ports.NodeRPCEndpoint(n),
+			EVMURL:  ports.NodeEVMRPCEndpoint(n),
 		}
 	}
 
@@ -225,6 +212,48 @@ func (s *DevnetService) GetStatus(ctx context.Context) (*dto.StatusOutput, error
 		Nodes:         health.Nodes,
 		AllHealthy:    health.AllHealthy,
 	}, nil
+}
+
+func deriveOverallStatusFromHealth(health *dto.HealthOutput, metadata *ports.DevnetMetadata) string {
+	if health == nil || len(health.Nodes) == 0 {
+		if metadata == nil {
+			return "unknown"
+		}
+		return string(metadata.Status)
+	}
+
+	running := 0
+	syncing := 0
+	errors := 0
+
+	for _, node := range health.Nodes {
+		switch node.Status {
+		case ports.NodeStatusRunning:
+			running++
+		case ports.NodeStatusSyncing:
+			syncing++
+		case ports.NodeStatusError:
+			errors++
+		default:
+			if node.IsRunning {
+				running++
+			}
+		}
+	}
+
+	total := len(health.Nodes)
+	switch {
+	case running == total:
+		return "running"
+	case running+syncing == total && syncing > 0:
+		return "syncing"
+	case running+syncing > 0:
+		return "partial"
+	case errors > 0:
+		return "error"
+	default:
+		return "stopped"
+	}
 }
 
 // Restart restarts all devnet nodes.
@@ -295,8 +324,8 @@ func (s *DevnetService) LoadDevnetInfo(ctx context.Context) (*dto.DevnetInfo, er
 			HomeDir: n.HomeDir,
 			NodeID:  n.NodeID,
 			Ports:   n.Ports,
-			RPCURL:  fmt.Sprintf("http://127.0.0.1:%d", n.Ports.RPC),
-			EVMURL:  fmt.Sprintf("http://127.0.0.1:%d", n.Ports.EVMRPC),
+			RPCURL:  ports.NodeRPCEndpoint(n),
+			EVMURL:  ports.NodeEVMRPCEndpoint(n),
 		}
 	}
 
@@ -424,7 +453,7 @@ func (s *DevnetService) GetExecutionModeInfo(ctx context.Context, nodeIndex int)
 
 	containerName := ""
 	if metadata.ExecutionMode == types.ExecutionModeDocker {
-		containerName = fmt.Sprintf("%s-devnet-node%d", normalizeContainerNetworkName(metadata.BlockchainNetwork), nodeIndex)
+		containerName = fmt.Sprintf("%s-devnet-node%d", ports.NormalizeContainerNetworkName(metadata.BlockchainNetwork), nodeIndex)
 	}
 
 	return &dto.ExecutionModeInfo{
@@ -433,14 +462,6 @@ func (s *DevnetService) GetExecutionModeInfo(ctx context.Context, nodeIndex int)
 		ContainerName: containerName,
 		LogPath:       node.HomeDir + "/" + s.getLogFileName(),
 	}, nil
-}
-
-func normalizeContainerNetworkName(name string) string {
-	normalized := strings.ToLower(strings.TrimSpace(name))
-	if normalized == "" {
-		return "stable"
-	}
-	return normalized
 }
 
 // StartNode starts a specific node.
@@ -517,7 +538,7 @@ func (s *DevnetService) StartNode(ctx context.Context, nodeIndex int) (*dto.Node
 
 		args := networkModule.StartCommand(containerHome, metadata.NetworkName)
 
-		containerName := fmt.Sprintf("%s-devnet-node%d", normalizeContainerNetworkName(metadata.BlockchainNetwork), nodeIndex)
+		containerName := fmt.Sprintf("%s-devnet-node%d", ports.NormalizeContainerNetworkName(metadata.BlockchainNetwork), nodeIndex)
 		if err := dockerExec.RemoveContainer(ctx, containerName, true); err != nil {
 			s.logger.Debug("Failed to remove existing container %s: %v", containerName, err)
 		}
@@ -536,6 +557,11 @@ func (s *DevnetService) StartNode(ctx context.Context, nodeIndex int) (*dto.Node
 				Error:         "docker image not configured",
 			}, fmt.Errorf("docker image not configured")
 		}
+		probeBinary := strings.TrimSpace(networkModule.BinaryName())
+		if probeBinary == "" {
+			probeBinary = commandcompat.InferBinaryFromDockerImage(image)
+		}
+		args = commandcompat.FilterDockerStartArgs(ctx, image, probeBinary, args, s.logger)
 
 		handle, err := dockerExec.RunContainer(ctx, ports.ContainerConfig{
 			Image:       image,
@@ -562,12 +588,20 @@ func (s *DevnetService) StartNode(ctx context.Context, nodeIndex int) (*dto.Node
 	} else {
 		// Build start command
 		args := networkModule.StartCommand(node.HomeDir, "")
-		if node.ChainID != "" {
-			args = append(args, "--chain-id", node.ChainID)
+		binaryPath := strings.TrimSpace(metadata.CustomBinaryPath)
+		if binaryPath == "" {
+			binaryPath = strings.TrimSpace(networkModule.BinaryName())
 		}
+		if binaryPath == "" {
+			binaryPath = strings.TrimSpace(metadata.BinaryName)
+		}
+		if binaryPath == "" {
+			binaryPath = "stabled"
+		}
+		args = commandcompat.FilterLocalStartArgs(ctx, binaryPath, args, s.logger)
 
 		cmd := ports.Command{
-			Binary:  networkModule.BinaryName(),
+			Binary:  binaryPath,
 			Args:    args,
 			WorkDir: node.HomeDir,
 			LogPath: filepath.Join(node.HomeDir, networkModule.LogFileName()),
@@ -648,7 +682,7 @@ func (s *DevnetService) StopNode(ctx context.Context, nodeIndex int, timeout tim
 
 		ref := strings.TrimSpace(node.ContainerID)
 		if ref == "" {
-			ref = fmt.Sprintf("%s-devnet-node%d", normalizeContainerNetworkName(metadata.BlockchainNetwork), nodeIndex)
+			ref = fmt.Sprintf("%s-devnet-node%d", ports.NormalizeContainerNetworkName(metadata.BlockchainNetwork), nodeIndex)
 		}
 
 		if err := dockerExec.StopContainer(ctx, ref, timeout); err != nil {

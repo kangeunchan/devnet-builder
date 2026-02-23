@@ -3,7 +3,9 @@ package di
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	appversion "github.com/altuslabsxyz/devnet-builder/internal/application/version"
@@ -30,6 +32,11 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/pkg/network/plugin"
 	"github.com/altuslabsxyz/devnet-builder/types"
 )
+
+var dockerInspectCommand = func(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	return cmd.Output()
+}
 
 // InfrastructureFactory creates infrastructure implementations.
 type InfrastructureFactory struct {
@@ -317,7 +324,7 @@ func (h *healthCheckerAdapter) CheckNode(ctx context.Context, rpcEndpoint string
 func (h *healthCheckerAdapter) CheckAllNodes(ctx context.Context, nodes []*ports.NodeMetadata) ([]*ports.HealthStatus, error) {
 	results := make([]*ports.HealthStatus, len(nodes))
 	for i, node := range nodes {
-		endpoint := fmt.Sprintf("http://127.0.0.1:%d", node.Ports.RPC)
+		endpoint := ports.NodeRPCEndpoint(node)
 		status, err := h.CheckNode(ctx, endpoint)
 		if err != nil {
 			results[i] = &ports.HealthStatus{
@@ -328,11 +335,89 @@ func (h *healthCheckerAdapter) CheckAllNodes(ctx context.Context, nodes []*ports
 			}
 			continue
 		}
+
+		h.applyDockerBootstrapFallback(ctx, node, status)
 		status.NodeIndex = node.Index
 		status.NodeName = node.Name
 		results[i] = status
 	}
 	return results, nil
+}
+
+func (h *healthCheckerAdapter) applyDockerBootstrapFallback(
+	ctx context.Context,
+	node *ports.NodeMetadata,
+	status *ports.HealthStatus,
+) {
+	if status == nil || status.Status != ports.NodeStatusError {
+		return
+	}
+	if !h.factory.dockerMode {
+		return
+	}
+
+	containerID := strings.TrimSpace(node.ContainerID)
+	if containerID == "" {
+		return
+	}
+
+	running, stateLabel, err := inspectDockerContainerRunning(ctx, containerID)
+	if err != nil {
+		if h.factory.logger != nil {
+			h.factory.logger.Debug(
+				"docker inspect fallback failed for node %d container %s: %v",
+				node.Index,
+				containerID,
+				err,
+			)
+		}
+		return
+	}
+	if !running {
+		return
+	}
+
+	status.IsRunning = true
+	status.Status = ports.NodeStatusSyncing
+	status.CatchingUp = true
+	status.Error = nil
+	if h.factory.logger != nil {
+		h.factory.logger.Debug(
+			"node %d mapped to syncing via docker state (container=%s state=%s)",
+			node.Index,
+			containerID,
+			stateLabel,
+		)
+	}
+}
+
+func inspectDockerContainerRunning(ctx context.Context, containerID string) (bool, string, error) {
+	inspectCtx := ctx
+	cancel := func() {}
+	if ctx == nil {
+		inspectCtx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		inspectCtx, cancel = context.WithTimeout(ctx, 3*time.Second)
+	}
+	defer cancel()
+
+	output, err := dockerInspectCommand(
+		inspectCtx,
+		"inspect",
+		"--format",
+		"{{.State.Running}}|{{.State.Status}}",
+		containerID,
+	)
+	if err != nil {
+		return false, "", err
+	}
+
+	parts := strings.SplitN(strings.TrimSpace(string(output)), "|", 2)
+	running := len(parts) > 0 && strings.EqualFold(strings.TrimSpace(parts[0]), "true")
+	if len(parts) == 1 {
+		return running, "", nil
+	}
+	return running, strings.TrimSpace(parts[1]), nil
 }
 
 // WireContainer wires all infrastructure components into a Container.

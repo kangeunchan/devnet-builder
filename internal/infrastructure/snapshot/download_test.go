@@ -62,6 +62,62 @@ func TestDownloadFile_ResumeFromPartialFile(t *testing.T) {
 	}
 }
 
+func TestDownloadFile_ResumeSkipsParallelProbe(t *testing.T) {
+	t.Setenv("DEVNET_SNAPSHOT_PARALLEL", "8")
+
+	fullData := []byte(strings.Repeat("resume-skip-parallel-", 2048))
+	var headCount atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			headCount.Add(1)
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", strconv.Itoa(len(fullData)))
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			rangeHeader := r.Header.Get("Range")
+			if rangeHeader == "" {
+				w.Header().Set("Content-Length", strconv.Itoa(len(fullData)))
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(fullData)
+				return
+			}
+
+			var start int
+			if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-", &start); err != nil || start < 0 || start >= len(fullData) {
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			chunk := fullData[start:]
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(fullData)-1, len(fullData)))
+			w.Header().Set("Content-Length", strconv.Itoa(len(chunk)))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(chunk)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	destPath := filepath.Join(t.TempDir(), "snapshot.tar.lz4")
+	partialPath := destPath + ".tmp"
+	partial := fullData[:len(fullData)/4]
+	if err := os.WriteFile(partialPath, partial, 0o644); err != nil {
+		t.Fatalf("write partial file: %v", err)
+	}
+
+	logger := output.NewLogger()
+	logger.SetNoColor(true)
+
+	if err := downloadFile(context.Background(), server.URL, destPath, logger, nil, 0); err != nil {
+		t.Fatalf("downloadFile failed: %v", err)
+	}
+	if headCount.Load() != 0 {
+		t.Fatalf("expected no HEAD probe during resume, got %d", headCount.Load())
+	}
+}
+
 func TestDownloadFile_RestartWhenRangeNotSupported(t *testing.T) {
 	fullData := []byte(strings.Repeat("full-download-data-", 4096))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

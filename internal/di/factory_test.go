@@ -2,6 +2,7 @@ package di
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
@@ -204,5 +205,73 @@ func TestNetworkModuleAdapter_SnapshotURL_UsesFirstFromSnapshotList(t *testing.T
 	got := adapter.SnapshotURL("mainnet")
 	if got != "https://primary-snapshot" {
 		t.Fatalf("unexpected snapshot URL: %q", got)
+	}
+}
+
+func TestHealthCheckerAdapter_MapsDockerRunningNodeToSyncing(t *testing.T) {
+	oldInspect := dockerInspectCommand
+	dockerInspectCommand = func(ctx context.Context, args ...string) ([]byte, error) {
+		return []byte("true|running"), nil
+	}
+	t.Cleanup(func() {
+		dockerInspectCommand = oldInspect
+	})
+
+	adapter := &healthCheckerAdapter{
+		factory: &InfrastructureFactory{dockerMode: true},
+	}
+	node := &ports.NodeMetadata{
+		Index:       0,
+		Name:        "node0",
+		ContainerID: "container-1",
+	}
+	status := &ports.HealthStatus{
+		Status: ports.NodeStatusError,
+		Error:  errors.New("rpc unavailable"),
+	}
+
+	adapter.applyDockerBootstrapFallback(context.Background(), node, status)
+
+	if status.Status != ports.NodeStatusSyncing {
+		t.Fatalf("expected syncing status, got %s", status.Status)
+	}
+	if !status.IsRunning {
+		t.Fatalf("expected IsRunning=true")
+	}
+	if status.Error != nil {
+		t.Fatalf("expected error cleared, got %v", status.Error)
+	}
+}
+
+func TestHealthCheckerAdapter_DoesNotOverrideStoppedContainer(t *testing.T) {
+	oldInspect := dockerInspectCommand
+	dockerInspectCommand = func(ctx context.Context, args ...string) ([]byte, error) {
+		return []byte("false|exited"), nil
+	}
+	t.Cleanup(func() {
+		dockerInspectCommand = oldInspect
+	})
+
+	adapter := &healthCheckerAdapter{
+		factory: &InfrastructureFactory{dockerMode: true},
+	}
+	node := &ports.NodeMetadata{
+		Index:       0,
+		Name:        "node0",
+		ContainerID: "container-1",
+	}
+	originalErr := errors.New("rpc unavailable")
+	status := &ports.HealthStatus{
+		Status: ports.NodeStatusError,
+		Error:  originalErr,
+	}
+
+	adapter.applyDockerBootstrapFallback(context.Background(), node, status)
+
+	if status.Status != ports.NodeStatusError {
+		t.Fatalf("expected error status to remain, got %s", status.Status)
+	}
+	if status.Error != originalErr {
+		t.Fatalf("expected original error to remain")
 	}
 }

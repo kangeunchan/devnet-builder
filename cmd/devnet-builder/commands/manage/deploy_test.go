@@ -1,8 +1,11 @@
 package manage
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -129,4 +132,133 @@ func TestValidateBinaryPath_PathWithSpaces(t *testing.T) {
 	if !filepath.IsAbs(result) {
 		t.Errorf("validateBinaryPath() should return absolute path, got: %s", result)
 	}
+}
+
+func TestRunDeployPreflight_DockerPermissionDenied(t *testing.T) {
+	restoreDeployPreflightStubs(t)
+	deployRunCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "docker" && len(args) > 0 && args[0] == "info" {
+			return []byte("permission denied while trying to connect to the Docker daemon socket"), errors.New("exit status 1")
+		}
+		return []byte("unexpected command"), nil
+	}
+
+	err := runDeployPreflight(context.Background(), deployPreflightOptions{
+		Mode:        "docker",
+		DockerImage: "ghcr.io/cosmos/gaia:v25.3.2",
+		BinaryName:  "gaiad",
+	})
+	if err == nil {
+		t.Fatalf("expected preflight error, got nil")
+	}
+	if !strings.Contains(err.Error(), "docker daemon is not accessible") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunDeployPreflight_MissingDecompressor(t *testing.T) {
+	restoreDeployPreflightStubs(t)
+	deployLookPath = func(file string) (string, error) {
+		return "", errors.New("not found")
+	}
+
+	err := runDeployPreflight(context.Background(), deployPreflightOptions{
+		Mode: "local",
+		Fork: true,
+	})
+	if err == nil {
+		t.Fatalf("expected preflight error, got nil")
+	}
+	if !strings.Contains(err.Error(), "snapshot decompressor not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunDeployPreflight_ImageCommandIncompatibility(t *testing.T) {
+	restoreDeployPreflightStubs(t)
+	deployRunCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name != "docker" {
+			return nil, errors.New("unexpected command")
+		}
+		if len(args) > 0 && args[0] == "info" {
+			return []byte("ok"), nil
+		}
+		if strings.Contains(strings.Join(args, " "), "start --help") {
+			return []byte("Error: unknown flag: --iavl-disable-fastnode"), errors.New("exit status 1")
+		}
+		return []byte("ok"), nil
+	}
+
+	err := runDeployPreflight(context.Background(), deployPreflightOptions{
+		Mode:        "docker",
+		DockerImage: "ghcr.io/cosmos/gaia:v25.3.2",
+		BinaryName:  "gaiad",
+	})
+	if err == nil {
+		t.Fatalf("expected preflight error, got nil")
+	}
+	if !strings.Contains(err.Error(), "image command probe failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "command=start --help") {
+		t.Fatalf("missing command context in error: %v", err)
+	}
+}
+
+func TestRunDeployPreflight_DockerSuccess(t *testing.T) {
+	restoreDeployPreflightStubs(t)
+
+	var startProbeCalled bool
+	var exportProbeCalled bool
+
+	deployLookPath = func(file string) (string, error) {
+		if file == "zstd" {
+			return "/usr/bin/zstd", nil
+		}
+		return "", errors.New("not found")
+	}
+	deployRunCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name != "docker" {
+			return nil, errors.New("unexpected command")
+		}
+		if len(args) > 0 && args[0] == "info" {
+			return []byte("ok"), nil
+		}
+
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "start --help") {
+			startProbeCalled = true
+		}
+		if strings.Contains(joined, "export --help") {
+			exportProbeCalled = true
+		}
+		return []byte("ok"), nil
+	}
+
+	err := runDeployPreflight(context.Background(), deployPreflightOptions{
+		Mode:        "docker",
+		Fork:        true,
+		DockerImage: "ghcr.io/cosmos/gaia:v25.3.2",
+		BinaryName:  "gaiad",
+	})
+	if err != nil {
+		t.Fatalf("expected preflight success, got error: %v", err)
+	}
+	if !startProbeCalled {
+		t.Fatalf("expected start --help probe to be executed")
+	}
+	if !exportProbeCalled {
+		t.Fatalf("expected export --help probe to be executed")
+	}
+}
+
+func restoreDeployPreflightStubs(t *testing.T) {
+	t.Helper()
+
+	oldRun := deployRunCommand
+	oldLookPath := deployLookPath
+	t.Cleanup(func() {
+		deployRunCommand = oldRun
+		deployLookPath = oldLookPath
+	})
 }

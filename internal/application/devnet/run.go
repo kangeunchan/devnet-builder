@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/altuslabsxyz/devnet-builder/internal/application/commandcompat"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	"github.com/altuslabsxyz/devnet-builder/types"
@@ -149,7 +150,7 @@ func (uc *RunUseCase) startNode(ctx context.Context, node *ports.NodeMetadata, m
 		return uc.startDockerNode(ctx, node, metadata)
 	}
 
-	cmd := uc.buildStartCommand(node, metadata)
+	cmd := uc.buildStartCommand(ctx, node, metadata)
 	return uc.executor.Start(ctx, cmd)
 }
 
@@ -178,6 +179,14 @@ func (uc *RunUseCase) startDockerNode(ctx context.Context, node *ports.NodeMetad
 	if uc.networkModule != nil {
 		args = uc.networkModule.StartCommand(containerHome, metadata.NetworkName)
 	}
+	probeBinary := ""
+	if uc.networkModule != nil {
+		probeBinary = strings.TrimSpace(uc.networkModule.BinaryName())
+	}
+	if probeBinary == "" {
+		probeBinary = commandcompat.InferBinaryFromDockerImage(image)
+	}
+	args = commandcompat.FilterDockerStartArgs(ctx, image, probeBinary, args, uc.logger)
 
 	containerName := dockerContainerName(metadata.BlockchainNetwork, node.Index)
 	if removeErr := dockerExec.RemoveContainer(ctx, containerName, true); removeErr != nil {
@@ -195,14 +204,11 @@ func (uc *RunUseCase) startDockerNode(ctx context.Context, node *ports.NodeMetad
 }
 
 func dockerContainerName(network string, index int) string {
-	name := strings.ToLower(strings.TrimSpace(network))
-	if name == "" {
-		name = "stable"
-	}
+	name := ports.NormalizeContainerNetworkName(network)
 	return fmt.Sprintf("%s-devnet-node%d", name, index)
 }
 
-func (uc *RunUseCase) buildStartCommand(node *ports.NodeMetadata, metadata *ports.DevnetMetadata) ports.Command {
+func (uc *RunUseCase) buildStartCommand(ctx context.Context, node *ports.NodeMetadata, metadata *ports.DevnetMetadata) ports.Command {
 	// Use custom binary path if available
 	binary := metadata.CustomBinaryPath
 	if binary == "" && uc.networkModule != nil {
@@ -222,9 +228,9 @@ func (uc *RunUseCase) buildStartCommand(node *ports.NodeMetadata, metadata *port
 	} else {
 		// Fallback: standard cosmos start command
 		args = []string{"start", "--home", node.HomeDir}
-		if metadata.ChainID != "" {
-			args = append(args, "--chain-id", metadata.ChainID)
-		}
+	}
+	if ctx != nil {
+		args = commandcompat.FilterLocalStartArgs(ctx, binary, args, uc.logger)
 	}
 
 	// Determine log and PID file names

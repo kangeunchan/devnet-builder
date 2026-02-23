@@ -237,6 +237,56 @@ func TestFetcherAdapter_FetchFromRPC_FallbackToChunked_StringIndices(t *testing.
 	}
 }
 
+func TestFetcherAdapter_FetchFromRPC_FallbackToChunked_MixedIndexTypes(t *testing.T) {
+	t.Parallel()
+
+	fullGenesis := `{"chain_id":"cosmoshub-4","app_state":{"bank":{"balances":[]}}}`
+	mid := len(fullGenesis) / 2
+	chunk0 := base64.StdEncoding.EncodeToString([]byte(fullGenesis[:mid]))
+	chunk1 := base64.StdEncoding.EncodeToString([]byte(fullGenesis[mid:]))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/genesis":
+			http.Error(w, "mainnet /genesis unavailable", http.StatusInternalServerError)
+			return
+		case "/genesis_chunked":
+			chunkParam := r.URL.Query().Get("chunk")
+			chunk, err := strconv.Atoi(chunkParam)
+			if err != nil {
+				http.Error(w, "invalid chunk", http.StatusBadRequest)
+				return
+			}
+			switch chunk {
+			case 0:
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":-1,"result":{"chunk":"0","total":2,"data":"` + chunk0 + `"}}`))
+				return
+			case 1:
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":-1,"result":{"chunk":1,"total":"2","data":"` + chunk1 + `"}}`))
+				return
+			default:
+				http.Error(w, "chunk out of range", http.StatusBadRequest)
+				return
+			}
+		default:
+			http.NotFound(w, r)
+			return
+		}
+	}))
+	defer server.Close()
+
+	homeDir := t.TempDir()
+	fetcher := NewFetcherAdapter(homeDir, "", "", false, nil)
+
+	got, err := fetcher.FetchFromRPC(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("FetchFromRPC returned error: %v", err)
+	}
+	if string(got) != fullGenesis {
+		t.Fatalf("unexpected fetched genesis: got=%s want=%s", string(got), fullGenesis)
+	}
+}
+
 func TestFetcherAdapter_FetchFromRPC_RetryChunkedAfterTransient500(t *testing.T) {
 	t.Parallel()
 
