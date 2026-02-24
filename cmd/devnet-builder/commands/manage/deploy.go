@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application"
+	"github.com/altuslabsxyz/devnet-builder/internal/application/commandcompat"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/config"
 	"github.com/altuslabsxyz/devnet-builder/internal/di"
@@ -44,6 +47,13 @@ var (
 	deployFork              bool   // Fork live network state via snapshot export
 	deployTestMnemonic      bool   // Use deterministic test mnemonics for validators
 	deployBinary            string // Custom binary path for local mode
+	deploySnapshotTimeout   time.Duration
+
+	deployRunCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, name, args...)
+		return cmd.CombinedOutput()
+	}
+	deployLookPath = exec.LookPath
 )
 
 // DeployResult represents the JSON output for the deploy command.
@@ -143,6 +153,8 @@ Examples:
 	// Fork mode flag - exports genesis from snapshot state instead of RPC genesis
 	cmd.Flags().BoolVar(&deployFork, "fork", true,
 		"Fork live network state (export genesis from snapshot)")
+	cmd.Flags().DurationVar(&deploySnapshotTimeout, "snapshot-timeout", 30*time.Minute,
+		"Snapshot download timeout (e.g., 30m, 2h)")
 
 	return cmd
 }
@@ -195,6 +207,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 	if versionEnv := os.Getenv("DEVNET_NETWORK_VERSION"); versionEnv != "" && !cmd.Flags().Changed("network-version") {
 		fileCfg.NetworkVersion = &versionEnv
+	}
+	if timeoutEnv := os.Getenv("DEVNET_SNAPSHOT_TIMEOUT"); timeoutEnv != "" && !cmd.Flags().Changed("snapshot-timeout") {
+		if parsed, parseErr := time.ParseDuration(timeoutEnv); parseErr == nil {
+			deploySnapshotTimeout = parsed
+		} else {
+			return fmt.Errorf("invalid DEVNET_SNAPSHOT_TIMEOUT %q: %w", timeoutEnv, parseErr)
+		}
 	}
 
 	// Run partial interactive setup for missing base config values
@@ -349,6 +368,23 @@ For more information, see: https://github.com/altuslabsxyz/devnet-builder/blob/m
 		return fmt.Errorf("failed to get network module: %w", err)
 	}
 
+	effectiveDockerImage := strings.TrimSpace(dockerImage)
+	if deployMode == string(types.ExecutionModeDocker) && effectiveDockerImage == "" {
+		effectiveDockerImage = strings.TrimSpace(networkModule.DockerImage())
+	}
+
+	if err := runDeployPreflight(ctx, deployPreflightOptions{
+		Mode:        deployMode,
+		Fork:        deployFork,
+		DockerImage: effectiveDockerImage,
+		BinaryName:  strings.TrimSpace(networkModule.BinaryName()),
+	}); err != nil {
+		if jsonMode {
+			return outputDeployError(err)
+		}
+		return err
+	}
+
 	// Check if devnet already exists
 	svc, err := application.GetServiceWithConfig(application.ServiceConfig{
 		HomeDir:       homeDir,
@@ -421,19 +457,20 @@ For more information, see: https://github.com/altuslabsxyz/devnet-builder/blob/m
 	// Note: BinaryPath is used for genesis export, CustomBinaryPath is used for node startup
 	// When --export-version is specified, these may be different binaries
 	provisionInput := dto.ProvisionInput{
-		HomeDir:           homeDir,
-		Network:           deployNetwork,
-		BlockchainNetwork: deployBlockchainNetwork,
-		NumValidators:     deployValidators,
-		NumAccounts:       deployAccounts,
-		Mode:              deployMode,
-		StableVersion:     startVersion,
-		DockerImage:       dockerImage,
-		NoCache:           deployNoCache,
-		CustomBinaryPath:  customBinaryPath, // Binary for node startup
-		UseSnapshot:       deployFork,
-		BinaryPath:        exportBinaryPath, // Binary for genesis export (may differ with --export-version)
-		UseTestMnemonic:   deployTestMnemonic,
+		HomeDir:                 homeDir,
+		Network:                 deployNetwork,
+		BlockchainNetwork:       deployBlockchainNetwork,
+		NumValidators:           deployValidators,
+		NumAccounts:             deployAccounts,
+		Mode:                    deployMode,
+		StableVersion:           startVersion,
+		DockerImage:             dockerImage,
+		NoCache:                 deployNoCache,
+		CustomBinaryPath:        customBinaryPath, // Binary for node startup
+		UseSnapshot:             deployFork,
+		BinaryPath:              exportBinaryPath, // Binary for genesis export (may differ with --export-version)
+		UseTestMnemonic:         deployTestMnemonic,
+		SnapshotDownloadTimeout: deploySnapshotTimeout,
 	}
 
 	_, err = svc.Provision(ctx, provisionInput)
@@ -553,6 +590,109 @@ func outputDeployError(err error) error {
 	data, _ := json.MarshalIndent(result, "", "  ")
 	fmt.Println(string(data))
 	return err
+}
+
+type deployPreflightOptions struct {
+	Mode        string
+	Fork        bool
+	DockerImage string
+	BinaryName  string
+}
+
+func runDeployPreflight(ctx context.Context, opts deployPreflightOptions) error {
+	if opts.Mode == string(types.ExecutionModeDocker) {
+		if err := checkDockerDaemonAccess(ctx); err != nil {
+			return err
+		}
+	}
+
+	if opts.Fork {
+		if err := checkSnapshotDecompressorDependency(); err != nil {
+			return err
+		}
+	}
+
+	if opts.Mode == string(types.ExecutionModeDocker) {
+		image := strings.TrimSpace(opts.DockerImage)
+		if image == "" {
+			return fmt.Errorf("deploy preflight failed: docker image is empty")
+		}
+
+		binaryName := strings.TrimSpace(opts.BinaryName)
+		if binaryName == "" {
+			binaryName = commandcompat.InferBinaryFromDockerImage(image)
+		}
+		if binaryName == "" {
+			return fmt.Errorf("deploy preflight failed: could not infer docker entrypoint for image %s", image)
+		}
+
+		if err := probeDockerImageCommandHelp(ctx, image, binaryName, "start"); err != nil {
+			return err
+		}
+		if err := probeDockerImageCommandHelp(ctx, image, binaryName, "export"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func checkDockerDaemonAccess(ctx context.Context) error {
+	output, err := deployRunCommand(ctx, "docker", "info")
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"deploy preflight failed: docker daemon is not accessible: %w\n"+
+			"resolution: ensure your user can access /var/run/docker.sock (e.g. add to docker group, then re-login/newgrp docker)\n"+
+			"docker info output: %s",
+		err,
+		strings.TrimSpace(string(output)),
+	)
+}
+
+func checkSnapshotDecompressorDependency() error {
+	if _, err := deployLookPath("zstd"); err == nil {
+		return nil
+	}
+	if _, err := deployLookPath("lz4"); err == nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"deploy preflight failed: snapshot decompressor not found (requires zstd or lz4)\n" +
+			"resolution: sudo apt-get update && sudo apt-get install -y zstd lz4",
+	)
+}
+
+func probeDockerImageCommandHelp(ctx context.Context, image, entrypoint, command string) error {
+	probeCtx := ctx
+	cancel := func() {}
+	if ctx == nil {
+		probeCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		probeCtx, cancel = context.WithTimeout(ctx, 30*time.Second)
+	}
+	defer cancel()
+
+	args := []string{"run", "--rm"}
+	if strings.TrimSpace(entrypoint) != "" {
+		args = append(args, "--entrypoint", entrypoint)
+	}
+	args = append(args, image, command, "--help")
+
+	output, err := deployRunCommand(probeCtx, "docker", args...)
+	if err != nil {
+		return fmt.Errorf(
+			"deploy preflight failed: image command probe failed (image=%s entrypoint=%s command=%s --help): %w\noutput: %s",
+			image,
+			entrypoint,
+			command,
+			err,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	return nil
 }
 
 // selectBinaryForDeployment orchestrates binary selection from cache or build.

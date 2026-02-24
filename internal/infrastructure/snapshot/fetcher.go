@@ -20,6 +20,8 @@ type FetcherAdapter struct {
 	logger  *output.Logger
 }
 
+var snapshotLookPath = exec.LookPath
+
 // NewFetcherAdapter creates a new FetcherAdapter.
 func NewFetcherAdapter(homeDir string, logger *output.Logger) *FetcherAdapter {
 	if logger == nil {
@@ -166,6 +168,12 @@ func (f *FetcherAdapter) DownloadWithProgress(ctx context.Context, url, cacheKey
 func (f *FetcherAdapter) Extract(ctx context.Context, archivePath, destPath string) error {
 	// Detect decompressor from file extension
 	decompressor := detectDecompressorFromPath(archivePath)
+	if err := validateExtractorDependencies(decompressor); err != nil {
+		return &SnapshotError{
+			Operation: "extract",
+			Message:   err.Error(),
+		}
+	}
 
 	// Get archive size for progress estimation
 	archiveInfo, err := os.Stat(archivePath)
@@ -226,6 +234,46 @@ func (f *FetcherAdapter) Extract(ctx context.Context, archivePath, destPath stri
 	}
 
 	f.logger.Success("Extraction complete")
+	return nil
+}
+
+func validateExtractorDependencies(decompressor string) error {
+	requireBinary := func(name, installHint string) error {
+		if _, err := snapshotLookPath(name); err != nil {
+			return fmt.Errorf(
+				"missing dependency: %s is required for snapshot extraction (%s)",
+				name,
+				installHint,
+			)
+		}
+		return nil
+	}
+
+	switch decompressor {
+	case "zstd":
+		if err := requireBinary("zstd", "install with: sudo apt-get install -y zstd"); err != nil {
+			return err
+		}
+		if err := requireBinary("tar", "install with: sudo apt-get install -y tar"); err != nil {
+			return err
+		}
+	case "lz4":
+		if err := requireBinary("lz4", "install with: sudo apt-get install -y lz4"); err != nil {
+			return err
+		}
+		if err := requireBinary("tar", "install with: sudo apt-get install -y tar"); err != nil {
+			return err
+		}
+	case "gzip":
+		if err := requireBinary("tar", "install with: sudo apt-get install -y tar"); err != nil {
+			return err
+		}
+	case "none":
+		if err := requireBinary("tar", "install with: sudo apt-get install -y tar"); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

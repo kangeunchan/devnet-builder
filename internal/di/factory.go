@@ -3,6 +3,9 @@ package di
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	appversion "github.com/altuslabsxyz/devnet-builder/internal/application/version"
@@ -29,6 +32,11 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/pkg/network/plugin"
 	"github.com/altuslabsxyz/devnet-builder/types"
 )
+
+var dockerInspectCommand = func(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	return cmd.Output()
+}
 
 // InfrastructureFactory creates infrastructure implementations.
 type InfrastructureFactory struct {
@@ -99,7 +107,11 @@ func (f *InfrastructureFactory) CreateDockerExecutor() ports.DockerExecutor {
 
 // CreateRPCClient creates an RPCClient for the given host and port.
 func (f *InfrastructureFactory) CreateRPCClient(host string, port int) ports.RPCClient {
-	return infrarpc.NewCosmosRPCClient(host, port)
+	client := infrarpc.NewCosmosRPCClient(host, port)
+	if pluginModule, ok := f.module.(infrarpc.NetworkPluginModule); ok {
+		return client.WithPlugin(pluginModule, "devnet")
+	}
+	return client
 }
 
 // CreateBinaryCache creates a BinaryCache implementation.
@@ -147,17 +159,28 @@ func (f *InfrastructureFactory) CreateNodeInitializer() ports.NodeInitializer {
 	mode := types.ExecutionModeLocal
 	dockerImage := ""
 	binaryPath := ""
+	binaryName := ""
+	dockerHomeDir := ""
 
 	if f.dockerMode {
 		mode = types.ExecutionModeDocker
 	}
 	if f.module != nil {
 		dockerImage = f.module.DockerImage()
-		binaryPath = f.homeDir + "/bin/" + f.module.BinaryName()
+		binaryName = f.module.BinaryName()
+		dockerHomeDir = f.module.DockerHomeDir()
+		binaryPath = f.homeDir + "/bin/" + binaryName
 	}
 
 	return &nodeInitializerAdapter{
-		inner: infranodeconfig.NewNodeInitializerWithBinary(mode, dockerImage, binaryPath, f.logger),
+		inner: infranodeconfig.NewNodeInitializerWithConfig(infranodeconfig.NodeInitializerConfig{
+			Mode:          mode,
+			DockerImage:   dockerImage,
+			BinaryPath:    binaryPath,
+			BinaryName:    binaryName,
+			DockerHomeDir: dockerHomeDir,
+			Logger:        f.logger,
+		}),
 	}
 }
 
@@ -199,6 +222,13 @@ func (f *InfrastructureFactory) CreateNodeManagerFactory() *infranode.NodeManage
 	config := infranode.FactoryConfig{
 		Mode:   mode,
 		Logger: f.logger,
+	}
+	if f.module != nil {
+		binaryName := f.module.BinaryName()
+		config.BinaryPath = f.homeDir + "/bin/" + binaryName
+		config.DockerImage = f.module.DockerImage()
+		config.DockerBinaryName = binaryName
+		config.DockerHomeDir = f.module.DockerHomeDir()
 	}
 	return infranode.NewNodeManagerFactory(config)
 }
@@ -261,6 +291,9 @@ type healthCheckerAdapter struct {
 func (h *healthCheckerAdapter) CheckNode(ctx context.Context, rpcEndpoint string) (*ports.HealthStatus, error) {
 	// Parse endpoint to get host and port (simplified - assumes http://host:port format)
 	client := infrarpc.NewCosmosRPCClientWithURL(rpcEndpoint)
+	if pluginModule, ok := h.factory.module.(infrarpc.NetworkPluginModule); ok {
+		client = client.WithPlugin(pluginModule, "devnet")
+	}
 
 	height, err := client.GetBlockHeight(ctx)
 	if err != nil {
@@ -291,7 +324,7 @@ func (h *healthCheckerAdapter) CheckNode(ctx context.Context, rpcEndpoint string
 func (h *healthCheckerAdapter) CheckAllNodes(ctx context.Context, nodes []*ports.NodeMetadata) ([]*ports.HealthStatus, error) {
 	results := make([]*ports.HealthStatus, len(nodes))
 	for i, node := range nodes {
-		endpoint := fmt.Sprintf("http://localhost:%d", node.Ports.RPC)
+		endpoint := ports.NodeRPCEndpoint(node)
 		status, err := h.CheckNode(ctx, endpoint)
 		if err != nil {
 			results[i] = &ports.HealthStatus{
@@ -302,11 +335,89 @@ func (h *healthCheckerAdapter) CheckAllNodes(ctx context.Context, nodes []*ports
 			}
 			continue
 		}
+
+		h.applyDockerBootstrapFallback(ctx, node, status)
 		status.NodeIndex = node.Index
 		status.NodeName = node.Name
 		results[i] = status
 	}
 	return results, nil
+}
+
+func (h *healthCheckerAdapter) applyDockerBootstrapFallback(
+	ctx context.Context,
+	node *ports.NodeMetadata,
+	status *ports.HealthStatus,
+) {
+	if status == nil || status.Status != ports.NodeStatusError {
+		return
+	}
+	if !h.factory.dockerMode {
+		return
+	}
+
+	containerID := strings.TrimSpace(node.ContainerID)
+	if containerID == "" {
+		return
+	}
+
+	running, stateLabel, err := inspectDockerContainerRunning(ctx, containerID)
+	if err != nil {
+		if h.factory.logger != nil {
+			h.factory.logger.Debug(
+				"docker inspect fallback failed for node %d container %s: %v",
+				node.Index,
+				containerID,
+				err,
+			)
+		}
+		return
+	}
+	if !running {
+		return
+	}
+
+	status.IsRunning = true
+	status.Status = ports.NodeStatusSyncing
+	status.CatchingUp = true
+	status.Error = nil
+	if h.factory.logger != nil {
+		h.factory.logger.Debug(
+			"node %d mapped to syncing via docker state (container=%s state=%s)",
+			node.Index,
+			containerID,
+			stateLabel,
+		)
+	}
+}
+
+func inspectDockerContainerRunning(ctx context.Context, containerID string) (bool, string, error) {
+	inspectCtx := ctx
+	cancel := func() {}
+	if ctx == nil {
+		inspectCtx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		inspectCtx, cancel = context.WithTimeout(ctx, 3*time.Second)
+	}
+	defer cancel()
+
+	output, err := dockerInspectCommand(
+		inspectCtx,
+		"inspect",
+		"--format",
+		"{{.State.Running}}|{{.State.Status}}",
+		containerID,
+	)
+	if err != nil {
+		return false, "", err
+	}
+
+	parts := strings.SplitN(strings.TrimSpace(string(output)), "|", 2)
+	running := len(parts) > 0 && strings.EqualFold(strings.TrimSpace(parts[0]), "true")
+	if len(parts) == 1 {
+		return running, "", nil
+	}
+	return running, strings.TrimSpace(parts[1]), nil
 }
 
 // WireContainer wires all infrastructure components into a Container.
@@ -331,11 +442,11 @@ func (f *InfrastructureFactory) WireContainer(opts ...Option) (*Container, error
 	binaryVersionDetector := f.CreateBinaryVersionDetector()
 
 	// Default RPC client (node0)
-	rpcClient := f.CreateRPCClient("localhost", 26657)
+	rpcClient := f.CreateRPCClient("127.0.0.1", 26657)
 	healthChecker := f.CreateHealthChecker(26657)
 
 	// Default EVM client (node0 EVM port)
-	evmClient := f.CreateEVMClient("http://localhost:8545")
+	evmClient := f.CreateEVMClient("http://127.0.0.1:8545")
 
 	// Validator key loader
 	validatorKeyLoader := f.CreateValidatorKeyLoader()
@@ -474,34 +585,73 @@ func (a *networkModuleAdapter) DefaultPorts() ports.PortConfig {
 }
 
 func (a *networkModuleAdapter) SnapshotURL(networkType string) string {
-	return a.module.SnapshotURL(networkType)
+	urls := a.SnapshotURLs(networkType)
+	if len(urls) == 0 {
+		return ""
+	}
+	return urls[0]
+}
+
+func (a *networkModuleAdapter) SnapshotURLs(networkType string) []string {
+	type provider interface {
+		SnapshotURLs(networkType string) []string
+	}
+	if p, ok := a.module.(provider); ok {
+		return compactUniqueStrings(p.SnapshotURLs(networkType))
+	}
+	return compactUniqueStrings([]string{a.module.SnapshotURL(networkType)})
 }
 
 func (a *networkModuleAdapter) RPCEndpoint(networkType string) string {
-	return a.module.RPCEndpoint(networkType)
+	endpoints := a.RPCEndpoints(networkType)
+	if len(endpoints) == 0 {
+		return ""
+	}
+	return endpoints[0]
+}
+
+func (a *networkModuleAdapter) RPCEndpoints(networkType string) []string {
+	type provider interface {
+		RPCEndpoints(networkType string) []string
+	}
+	if p, ok := a.module.(provider); ok {
+		return compactUniqueStrings(p.RPCEndpoints(networkType))
+	}
+	return compactUniqueStrings([]string{a.module.RPCEndpoint(networkType)})
 }
 
 func (a *networkModuleAdapter) AvailableNetworks() []string {
 	return a.module.AvailableNetworks()
 }
 
-func (a *networkModuleAdapter) ModifyGenesis(genesis []byte, opts ports.GenesisModifyOptions) ([]byte, error) {
-	// Convert ports.ValidatorInfo to network.GenesisValidatorInfo
-	validators := make([]network.GenesisValidatorInfo, len(opts.AddValidators))
-	for i, v := range opts.AddValidators {
-		validators[i] = network.GenesisValidatorInfo{
-			Moniker:         v.Moniker,
-			ConsPubKey:      v.ConsPubKey,
-			OperatorAddress: v.OperatorAddress,
-			SelfDelegation:  v.SelfDelegation,
-		}
+func compactUniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
 	}
 
-	// Convert ports.GenesisModifyOptions to network.GenesisOptions
-	networkOpts := network.GenesisOptions{
-		ChainID:       opts.ChainID,
-		NumValidators: opts.NumValidators,
-		Validators:    validators,
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (a *networkModuleAdapter) ModifyGenesis(genesis []byte, opts ports.GenesisModifyOptions) ([]byte, error) {
+	networkOpts, err := toNetworkGenesisOptions(opts)
+	if err != nil {
+		return nil, err
 	}
 	return a.module.ModifyGenesis(genesis, networkOpts)
 }
@@ -515,25 +665,40 @@ func (a *networkModuleAdapter) ModifyGenesisFile(inputPath, outputPath string, o
 		return 0, fmt.Errorf("network module does not support file-based genesis modification")
 	}
 
-	// Convert ports.ValidatorInfo to network.GenesisValidatorInfo
-	validators := make([]network.GenesisValidatorInfo, len(opts.AddValidators))
-	for i, v := range opts.AddValidators {
-		validators[i] = network.GenesisValidatorInfo{
-			Moniker:         v.Moniker,
-			ConsPubKey:      v.ConsPubKey,
-			OperatorAddress: v.OperatorAddress,
-			SelfDelegation:  v.SelfDelegation,
-		}
-	}
-
-	// Convert ports.GenesisModifyOptions to network.GenesisOptions
-	networkOpts := network.GenesisOptions{
-		ChainID:       opts.ChainID,
-		NumValidators: opts.NumValidators,
-		Validators:    validators,
+	networkOpts, err := toNetworkGenesisOptions(opts)
+	if err != nil {
+		return 0, err
 	}
 
 	return fileModifier.ModifyGenesisFile(inputPath, outputPath, networkOpts)
+}
+
+func toNetworkGenesisOptions(opts ports.GenesisModifyOptions) (network.GenesisOptions, error) {
+	validators := make([]network.GenesisValidatorInfo, len(opts.AddValidators))
+	for i, validator := range opts.AddValidators {
+		validators[i] = network.GenesisValidatorInfo{
+			Moniker:         validator.Moniker,
+			ConsPubKey:      validator.ConsPubKey,
+			OperatorAddress: validator.OperatorAddress,
+			SelfDelegation:  validator.SelfDelegation,
+		}
+	}
+
+	accounts := make([]network.GenesisAccount, len(opts.AddAccounts))
+	for i, account := range opts.AddAccounts {
+		accounts[i] = network.GenesisAccount{
+			Name:    account.Name,
+			Address: account.Address,
+			Balance: account.Balance,
+		}
+	}
+
+	return network.GenesisOptions{
+		ChainID:       opts.ChainID,
+		NumValidators: opts.NumValidators,
+		Validators:    validators,
+		Accounts:      accounts,
+	}, nil
 }
 
 func (a *networkModuleAdapter) GenesisConfig() ports.GenesisConfig {
@@ -601,9 +766,9 @@ func (f *InfrastructureFactory) WireContainerV2(opts ...OptionV2) (*ContainerV2,
 	}
 
 	binaryVersionDetector := f.CreateBinaryVersionDetector()
-	rpcClient := f.CreateRPCClient("localhost", 26657)
+	rpcClient := f.CreateRPCClient("127.0.0.1", 26657)
 	healthChecker := f.CreateHealthChecker(26657)
-	evmClient := f.CreateEVMClient("http://localhost:8545")
+	evmClient := f.CreateEVMClient("http://127.0.0.1:8545")
 	validatorKeyLoader := f.CreateValidatorKeyLoader()
 	githubClient := f.CreateGitHubClient()
 	interactiveSelector := f.CreateInteractiveSelector()

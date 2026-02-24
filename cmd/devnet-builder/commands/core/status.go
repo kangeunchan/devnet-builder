@@ -130,6 +130,8 @@ func outputStatusText(status *dto.StatusOutput) error {
 		statusStr = color.YellowString("stopped")
 	case "partial":
 		statusStr = color.CyanString("partial")
+	case "syncing":
+		statusStr = color.CyanString("syncing")
 	case "error":
 		statusStr = color.RedString("error")
 	}
