@@ -441,6 +441,10 @@ type ExportOptions struct {
 	// ModulesToSkip is a list of module names to skip during export.
 	ModulesToSkip []string
 
+	// ModulesToExport is an allowlist of module names to export.
+	// When set, only the listed modules are exported.
+	ModulesToExport []string
+
 	// Height specifies a specific height to export from.
 	// If 0, exports from the latest height.
 	Height int64

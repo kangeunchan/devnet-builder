@@ -540,11 +540,12 @@ type pluginStateExporterAdapter struct {
 // ExportCommandWithOptions returns arguments for exporting genesis/state with options.
 func (a *pluginStateExporterAdapter) ExportCommandWithOptions(homeDir string, opts ExportOptions) []string {
 	pkgOpts := pkgNetwork.ExportOptions{
-		ForZeroHeight: opts.ForZeroHeight,
-		JailWhitelist: opts.JailWhitelist,
-		ModulesToSkip: opts.ModulesToSkip,
-		Height:        opts.Height,
-		OutputPath:    opts.OutputPath,
+		ForZeroHeight:   opts.ForZeroHeight,
+		JailWhitelist:   opts.JailWhitelist,
+		ModulesToSkip:   opts.ModulesToSkip,
+		ModulesToExport: opts.ModulesToExport,
+		Height:          opts.Height,
+		OutputPath:      opts.OutputPath,
 	}
 	return a.module.ExportCommandWithOptions(homeDir, pkgOpts)
 }

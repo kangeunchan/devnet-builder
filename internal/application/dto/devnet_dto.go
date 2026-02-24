@@ -25,6 +25,9 @@ type ProvisionInput struct {
 	UseSnapshot       bool   // If true, export genesis from snapshot state instead of RPC genesis
 	BinaryPath        string // Path to binary for state export (required when UseSnapshot=true)
 	UseTestMnemonic   bool   // If true, use deterministic test mnemonics for validators
+	ForkMode          string // fork-full | fork-trimmed
+	ExportModules     []string
+	GenesisPatchFile  string // Optional JSON patch policy file for generic genesis patch stage
 	// SnapshotDownloadTimeout limits snapshot download duration when UseSnapshot is true.
 	// Zero means use infrastructure default timeout.
 	SnapshotDownloadTimeout time.Duration

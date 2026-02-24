@@ -252,6 +252,39 @@ func TestRunDeployPreflight_DockerSuccess(t *testing.T) {
 	}
 }
 
+func TestNormalizeDeployForkMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "default", input: "", want: "fork-trimmed"},
+		{name: "full", input: "fork-full", want: "fork-full"},
+		{name: "trimmed", input: "fork-trimmed", want: "fork-trimmed"},
+		{name: "invalid", input: "wrong", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := normalizeDeployForkMode(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func restoreDeployPreflightStubs(t *testing.T) {
 	t.Helper()
 

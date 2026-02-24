@@ -48,6 +48,9 @@ var (
 	deployTestMnemonic      bool   // Use deterministic test mnemonics for validators
 	deployBinary            string // Custom binary path for local mode
 	deploySnapshotTimeout   time.Duration
+	deployForkMode          string
+	deployExportModules     []string
+	deployGenesisPatchFile  string
 
 	deployRunCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, name, args...)
@@ -155,6 +158,12 @@ Examples:
 		"Fork live network state (export genesis from snapshot)")
 	cmd.Flags().DurationVar(&deploySnapshotTimeout, "snapshot-timeout", 30*time.Minute,
 		"Snapshot download timeout (e.g., 30m, 2h)")
+	cmd.Flags().StringVar(&deployForkMode, "fork-mode", "fork-trimmed",
+		"Fork pipeline mode (fork-full, fork-trimmed)")
+	cmd.Flags().StringSliceVar(&deployExportModules, "export-modules", nil,
+		"Modules allowlist for export --modules-to-export (repeat or comma-separated)")
+	cmd.Flags().StringVar(&deployGenesisPatchFile, "genesis-patch-file", "",
+		"Path to generic genesis patch policy JSON file")
 
 	return cmd
 }
@@ -312,6 +321,10 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if !types.NetworkSource(deployNetwork).IsValid() {
 		return fmt.Errorf("invalid network: %s (must be 'mainnet' or 'testnet')", deployNetwork)
 	}
+	normalizedForkMode, err := normalizeDeployForkMode(deployForkMode)
+	if err != nil {
+		return err
+	}
 	// Validate validator count based on mode
 	if deployMode == string(types.ExecutionModeDocker) {
 		if deployValidators < 1 || deployValidators > 100 {
@@ -371,6 +384,13 @@ For more information, see: https://github.com/altuslabsxyz/devnet-builder/blob/m
 	effectiveDockerImage := strings.TrimSpace(dockerImage)
 	if deployMode == string(types.ExecutionModeDocker) && effectiveDockerImage == "" {
 		effectiveDockerImage = strings.TrimSpace(networkModule.DockerImage())
+	}
+	if deployFork {
+		if patchPath := strings.TrimSpace(deployGenesisPatchFile); patchPath != "" {
+			if _, statErr := os.Stat(patchPath); statErr != nil {
+				return fmt.Errorf("genesis patch file not found at %q: %w", patchPath, statErr)
+			}
+		}
 	}
 
 	if err := runDeployPreflight(ctx, deployPreflightOptions{
@@ -470,6 +490,9 @@ For more information, see: https://github.com/altuslabsxyz/devnet-builder/blob/m
 		UseSnapshot:             deployFork,
 		BinaryPath:              exportBinaryPath, // Binary for genesis export (may differ with --export-version)
 		UseTestMnemonic:         deployTestMnemonic,
+		ForkMode:                normalizedForkMode,
+		ExportModules:           append([]string(nil), deployExportModules...),
+		GenesisPatchFile:        strings.TrimSpace(deployGenesisPatchFile),
 		SnapshotDownloadTimeout: deploySnapshotTimeout,
 	}
 
@@ -485,6 +508,17 @@ For more information, see: https://github.com/altuslabsxyz/devnet-builder/blob/m
 	// Phase 2: Run using DevnetService
 	runResult, err := svc.Start(ctx, 5*time.Minute)
 	if err != nil {
+		logger.SetAutoSpinner(false)
+		if jsonMode {
+			return outputDeployError(err)
+		}
+		return err
+	}
+	smokeTimeout := 3 * time.Minute
+	if deployFork {
+		smokeTimeout = 15 * time.Minute
+	}
+	if err := waitForDeployBlockSmoke(ctx, svc, smokeTimeout); err != nil {
 		logger.SetAutoSpinner(false)
 		if jsonMode {
 			return outputDeployError(err)
@@ -1053,4 +1087,48 @@ func isPortInUse(port int) bool {
 	}
 	listener.Close()
 	return false
+}
+
+func normalizeDeployForkMode(mode string) (string, error) {
+	normalized := strings.TrimSpace(strings.ToLower(mode))
+	if normalized == "" {
+		return "fork-trimmed", nil
+	}
+	switch normalized {
+	case "fork-full", "fork-trimmed":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("invalid fork mode: %s (must be 'fork-full' or 'fork-trimmed')", mode)
+	}
+}
+
+func waitForDeployBlockSmoke(ctx context.Context, svc *application.DevnetService, timeout time.Duration) error {
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var lastErr error
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-checkCtx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("boot smoke test failed: no block height progress within %s (last error: %w)", timeout, lastErr)
+			}
+			return fmt.Errorf("boot smoke test failed: no block height progress within %s", timeout)
+		case <-ticker.C:
+			status, err := svc.GetStatus(checkCtx)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+
+			for _, node := range status.Nodes {
+				if node.BlockHeight > 0 {
+					return nil
+				}
+			}
+		}
+	}
 }

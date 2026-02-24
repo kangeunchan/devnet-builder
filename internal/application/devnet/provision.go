@@ -58,6 +58,13 @@ func NewProvisionUseCase(
 // Execute provisions a new devnet.
 func (uc *ProvisionUseCase) Execute(ctx context.Context, input dto.ProvisionInput) (*dto.ProvisionOutput, error) {
 	uc.logger.Info("Provisioning devnet...")
+	if input.UseSnapshot {
+		forkMode, err := normalizeForkMode(input.ForkMode)
+		if err != nil {
+			return nil, err
+		}
+		input.ForkMode = forkMode
+	}
 
 	// Check if devnet already exists
 	if uc.devnetRepo.Exists(input.HomeDir) {
@@ -117,6 +124,17 @@ func (uc *ProvisionUseCase) Execute(ctx context.Context, input dto.ProvisionInpu
 		if err != nil {
 			return nil, fmt.Errorf("failed to export genesis from snapshot: %w", err)
 		}
+		exportedSize := len(genesis)
+		genesis, err = applyForkTransform(genesis, input.ForkMode)
+		if err != nil {
+			return nil, fmt.Errorf("failed to apply fork transform (%s): %w", input.ForkMode, err)
+		}
+		uc.logger.Info(
+			"Fork transform applied (%s): %.1f MB -> %.1f MB",
+			input.ForkMode,
+			bytesToMB(exportedSize),
+			bytesToMB(len(genesis)),
+		)
 	} else {
 		genesis = rpcGenesis
 	}
@@ -208,6 +226,32 @@ func (uc *ProvisionUseCase) Execute(ctx context.Context, input dto.ProvisionInpu
 			genesis = modifiedGenesis
 		}
 		uc.logger.Debug("Genesis modified with %d validators", len(validators))
+	}
+
+	if input.UseSnapshot {
+		beforePatch := len(genesis)
+		genesis, err = applyGenericPatchPolicy(genesis, input.GenesisPatchFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to apply generic genesis patch policy: %w", err)
+		}
+		if input.GenesisPatchFile != "" {
+			uc.logger.Info("Generic patch applied: %.1f MB -> %.1f MB", bytesToMB(beforePatch), bytesToMB(len(genesis)))
+		}
+
+		beforeRecompute := len(genesis)
+		genesis, err = recomputeDerivedGenesis(genesis)
+		if err != nil {
+			return nil, fmt.Errorf("failed to recompute derived genesis values: %w", err)
+		}
+		uc.logger.Info("Derived values recomputed: %.1f MB -> %.1f MB", bytesToMB(beforeRecompute), bytesToMB(len(genesis)))
+
+		if err := enforceGenesisSizeGuardrail(genesis); err != nil {
+			return nil, err
+		}
+
+		if err := validateGenesisForDeploy(genesis); err != nil {
+			return nil, err
+		}
 	}
 
 	// Step 4: Write modified genesis to all nodes
@@ -876,6 +920,10 @@ func (uc *ProvisionUseCase) exportGenesisFromSnapshot(ctx context.Context, input
 	// Step 3: Export genesis from snapshot state
 	// Pass snapshot information to enable genesis export caching
 	uc.logger.Info("Exporting genesis from snapshot state...")
+	exportCommandOpts, err := buildSnapshotExportOptions(input, uc.stateExportSvc.DefaultExportOptions())
+	if err != nil {
+		return nil, err
+	}
 	exportOpts := ports.StateExportOptions{
 		HomeDir:           exportDir,
 		BinaryPath:        binaryPath,
@@ -883,7 +931,7 @@ func (uc *ProvisionUseCase) exportGenesisFromSnapshot(ctx context.Context, input
 		BinaryName:        binaryName,
 		DockerHomeDir:     dockerHomeDir,
 		RpcGenesis:        rpcGenesis,
-		ExportOpts:        uc.stateExportSvc.DefaultExportOptions(),
+		ExportOpts:        exportCommandOpts,
 		Network:           input.Network, // Keep for backward compatibility
 		CacheKey:          cacheKey,      // Use composite cache key
 		SnapshotURL:       snapshotURL,
@@ -946,4 +994,8 @@ func (uc *ProvisionUseCase) modifyGenesisViaFile(ctx context.Context, genesis []
 	_ = os.RemoveAll(tmpDir)
 
 	return modifiedGenesis, nil
+}
+
+func bytesToMB(size int) float64 {
+	return float64(size) / (1024 * 1024)
 }

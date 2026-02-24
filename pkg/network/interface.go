@@ -318,9 +318,9 @@ type GenesisAccountInfo struct {
 
 // GenesisOptions contains user-provided overrides for genesis modification.
 type GenesisOptions struct {
-	ChainID       string          `json:"chain_id,omitempty"`
-	NumValidators int             `json:"num_validators,omitempty"`
-	Validators    []ValidatorInfo `json:"validators,omitempty"`
+	ChainID       string               `json:"chain_id,omitempty"`
+	NumValidators int                  `json:"num_validators,omitempty"`
+	Validators    []ValidatorInfo      `json:"validators,omitempty"`
 	AddAccounts   []GenesisAccountInfo `json:"add_accounts,omitempty"`
 }
 
@@ -393,6 +393,10 @@ type ExportOptions struct {
 
 	// ModulesToSkip is a list of module names to skip during export.
 	ModulesToSkip []string `json:"modules_to_skip,omitempty"`
+
+	// ModulesToExport is an allowlist of module names to export.
+	// When set, only the listed modules are exported.
+	ModulesToExport []string `json:"modules_to_export,omitempty"`
 
 	// Height specifies a specific height to export from.
 	// If 0, exports from the latest height.

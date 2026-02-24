@@ -451,11 +451,12 @@ func (a *Adapter) defaultValidateGenesis(genesis []byte) error {
 // DefaultExportOptions returns the default export options for devnet.
 func (a *Adapter) DefaultExportOptions() *ports.ExportOptions {
 	return &ports.ExportOptions{
-		ForZeroHeight: false,
-		JailWhitelist: nil,
-		ModulesToSkip: nil,
-		Height:        0,
-		OutputPath:    "",
+		ForZeroHeight:   true,
+		JailWhitelist:   nil,
+		ModulesToSkip:   nil,
+		ModulesToExport: nil,
+		Height:          0,
+		OutputPath:      "",
 	}
 }
 
@@ -480,6 +481,10 @@ func (a *Adapter) buildExportCommand(homeDir string, opts *ports.ExportOptions) 
 
 	for _, addr := range opts.JailWhitelist {
 		args = append(args, "--jail-allowed-addrs", addr)
+	}
+
+	if len(opts.ModulesToExport) > 0 {
+		args = append(args, "--modules-to-export", strings.Join(opts.ModulesToExport, ","))
 	}
 
 	return args
@@ -519,11 +524,12 @@ func convertToPkgExportOptions(opts *ports.ExportOptions) pkgNetwork.ExportOptio
 		}
 	}
 	return pkgNetwork.ExportOptions{
-		ForZeroHeight: opts.ForZeroHeight,
-		JailWhitelist: opts.JailWhitelist,
-		ModulesToSkip: opts.ModulesToSkip,
-		Height:        opts.Height,
-		OutputPath:    opts.OutputPath,
+		ForZeroHeight:   opts.ForZeroHeight,
+		JailWhitelist:   opts.JailWhitelist,
+		ModulesToSkip:   opts.ModulesToSkip,
+		ModulesToExport: opts.ModulesToExport,
+		Height:          opts.Height,
+		OutputPath:      opts.OutputPath,
 	}
 }
 
