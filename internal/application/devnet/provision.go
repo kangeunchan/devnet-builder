@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cosmos/cosmos-sdk/types/bech32"
@@ -87,26 +88,29 @@ func (uc *ProvisionUseCase) Execute(ctx context.Context, input dto.ProvisionInpu
 		CurrentVersion:    input.StableVersion, // Initially same as deployed version
 		CreatedAt:         time.Now(),
 	}
-
-	// Get RPC endpoint for fetching genesis
-	rpcEndpoint := ""
 	if uc.networkModule != nil {
-		rpcEndpoint = uc.networkModule.RPCEndpoint(input.Network)
+		metadata.BinaryName = uc.networkModule.BinaryName()
+		if metadata.DockerImage == "" && execMode == types.ExecutionModeDocker {
+			metadata.DockerImage = uc.networkModule.DockerImage()
+		}
 	}
 
-	// Fetch genesis from RPC (required for initial provisioning)
+	// Fetch genesis from RPC (required for initial provisioning).
+	rpcEndpoint := uc.resolveRPCEndpoint(input.Network)
 	if rpcEndpoint == "" {
 		return nil, fmt.Errorf("no RPC endpoint available for network: %s", input.Network)
 	}
-
 	uc.logger.Info("Fetching genesis from RPC %s...", rpcEndpoint)
-	rpcGenesis, err := uc.genesisSvc.FetchFromRPC(ctx, rpcEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch genesis from RPC: %w", err)
+	rpcGenesis, fetchErr := uc.genesisSvc.FetchFromRPC(ctx, rpcEndpoint)
+	if fetchErr != nil {
+		return nil, fmt.Errorf("failed to fetch genesis from RPC %s: %w", rpcEndpoint, fetchErr)
 	}
 
 	// Use snapshot-based export if requested
-	var genesis []byte
+	var (
+		genesis []byte
+		err     error
+	)
 	if input.UseSnapshot && uc.stateExportSvc != nil {
 		uc.logger.Info("Exporting genesis from snapshot state...")
 		genesis, err = uc.exportGenesisFromSnapshot(ctx, input, rpcGenesis)
@@ -143,15 +147,16 @@ func (uc *ProvisionUseCase) Execute(ctx context.Context, input dto.ProvisionInpu
 	}
 
 	// Step 2.2: Create and save additional account keys (for testing/transactions)
+	var additionalAccountKeys []*ports.AccountKeyInfo
 	if input.NumAccounts > 0 {
 		uc.logger.Info("Creating %d additional account keys...", input.NumAccounts)
-		additionalAccounts, err := uc.createAdditionalAccountKeys(ctx, accountsDir, input.NumAccounts, input.UseTestMnemonic, input.NumValidators)
+		additionalAccountKeys, err = uc.createAdditionalAccountKeys(ctx, accountsDir, input.NumAccounts, input.UseTestMnemonic, input.NumValidators)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create additional account keys: %w", err)
 		}
 
 		uc.logger.Debug("Saving account key information...")
-		if err := uc.saveAccountKeys(input.HomeDir, additionalAccounts); err != nil {
+		if err := uc.saveAccountKeys(input.HomeDir, additionalAccountKeys); err != nil {
 			return nil, fmt.Errorf("failed to save account keys: %w", err)
 		}
 	}
@@ -176,7 +181,13 @@ func (uc *ProvisionUseCase) Execute(ctx context.Context, input dto.ProvisionInpu
 			ChainID:       chainID,
 			NumValidators: input.NumValidators,
 			AddValidators: validators,
+			AddAccounts:   buildGenesisAccounts(additionalAccountKeys),
 		}
+		uc.logger.Debug(
+			"Prepared genesis modify options: validators=%d add_accounts=%d",
+			len(opts.AddValidators),
+			len(opts.AddAccounts),
+		)
 
 		// Check genesis size - gRPC has 4MB default limit
 		const grpcSizeLimit = 4 * 1024 * 1024 // 4MB
@@ -299,6 +310,7 @@ func calculateNodePorts(basePorts ports.PortConfig, index int) ports.PortConfig 
 func (uc *ProvisionUseCase) initializeNodes(ctx context.Context, input dto.ProvisionInput, chainID string) ([]*ports.NodeMetadata, error) {
 	nodes := make([]*ports.NodeMetadata, input.NumValidators)
 	defaultPorts := uc.networkModule.DefaultPorts()
+	stopSpinnerIfSupported(uc.logger)
 
 	for i := 0; i < input.NumValidators; i++ {
 		nodeDir := paths.NodePath(input.HomeDir, i)
@@ -312,6 +324,7 @@ func (uc *ProvisionUseCase) initializeNodes(ctx context.Context, input dto.Provi
 		// Initialize the node (creates priv_validator_key.json)
 		uc.logger.Debug("Initializing node %d at %s with chainID %s", i, nodeDir, chainID)
 		if err := uc.nodeInitializer.Initialize(ctx, nodeDir, moniker, chainID); err != nil {
+			uc.logger.Println("")
 			return nil, fmt.Errorf("failed to initialize node %d: %w", i, err)
 		}
 
@@ -329,6 +342,8 @@ func (uc *ProvisionUseCase) initializeNodes(ctx context.Context, input dto.Provi
 			NodeID:  nodeID,
 			Ports:   calculateNodePorts(defaultPorts, i),
 		}
+
+		printLoopProgress(uc.logger, "Initializing nodes", i+1, input.NumValidators)
 	}
 
 	return nodes, nil
@@ -415,6 +430,7 @@ func hexToBytes(hexStr string) ([]byte, error) {
 // If useTestMnemonic is true, deterministic test mnemonics are used for reproducible testing.
 func (uc *ProvisionUseCase) createAccountKeys(ctx context.Context, accountsDir string, numValidators int, useTestMnemonic bool) ([]*ports.AccountKeyInfo, error) {
 	keys := make([]*ports.AccountKeyInfo, numValidators)
+	stopSpinnerIfSupported(uc.logger)
 
 	for i := 0; i < numValidators; i++ {
 		keyName := fmt.Sprintf("validator%d", i)
@@ -440,6 +456,7 @@ func (uc *ProvisionUseCase) createAccountKeys(ctx context.Context, accountsDir s
 		}
 
 		keys[i] = keyInfo
+		printLoopProgress(uc.logger, "Creating validator keys", i+1, numValidators)
 	}
 
 	return keys, nil
@@ -491,6 +508,7 @@ func (uc *ProvisionUseCase) saveValidatorKeys(homeDir string, accountKeys []*por
 // The offset parameter allows starting key naming after validator keys (e.g., account0, account1...).
 func (uc *ProvisionUseCase) createAdditionalAccountKeys(ctx context.Context, accountsDir string, numAccounts int, useTestMnemonic bool, mnemonicOffset int) ([]*ports.AccountKeyInfo, error) {
 	keys := make([]*ports.AccountKeyInfo, numAccounts)
+	stopSpinnerIfSupported(uc.logger)
 
 	for i := 0; i < numAccounts; i++ {
 		keyName := fmt.Sprintf("account%d", i)
@@ -517,6 +535,7 @@ func (uc *ProvisionUseCase) createAdditionalAccountKeys(ctx context.Context, acc
 		}
 
 		keys[i] = keyInfo
+		printLoopProgress(uc.logger, "Creating test accounts", i+1, numAccounts)
 	}
 
 	return keys, nil
@@ -555,6 +574,46 @@ func (uc *ProvisionUseCase) saveAccountKeys(homeDir string, accountKeys []*ports
 	return nil
 }
 
+func buildGenesisAccounts(accountKeys []*ports.AccountKeyInfo) []ports.AccountInfo {
+	if len(accountKeys) == 0 {
+		return nil
+	}
+
+	accounts := make([]ports.AccountInfo, 0, len(accountKeys))
+	for _, key := range accountKeys {
+		if key == nil || key.Address == "" {
+			continue
+		}
+
+		accounts = append(accounts, ports.AccountInfo{
+			Name:    key.Name,
+			Address: key.Address,
+		})
+	}
+
+	return accounts
+}
+
+func (uc *ProvisionUseCase) resolveRPCEndpoint(networkType string) string {
+	if uc.networkModule == nil {
+		return ""
+	}
+
+	return strings.TrimSpace(uc.networkModule.RPCEndpoint(networkType))
+}
+
+func (uc *ProvisionUseCase) resolveSnapshotURL(input dto.ProvisionInput) string {
+	if override := strings.TrimSpace(input.SnapshotURL); override != "" {
+		return override
+	}
+
+	if uc.networkModule == nil {
+		return ""
+	}
+
+	return strings.TrimSpace(uc.networkModule.SnapshotURL(input.Network))
+}
+
 // buildValidatorInfo combines consensus keys from nodes with account addresses.
 // - ConsPubKey: from priv_validator_key.json (ed25519) for block signing
 // - OperatorAddress: from account key (secp256k1) for transaction signing
@@ -564,6 +623,7 @@ func (uc *ProvisionUseCase) buildValidatorInfo(nodes []*ports.NodeMetadata, acco
 	}
 
 	validators := make([]ports.ValidatorInfo, len(nodes))
+	stopSpinnerIfSupported(uc.logger)
 
 	for i, node := range nodes {
 		// Read consensus pubkey from priv_validator_key.json
@@ -600,6 +660,7 @@ func (uc *ProvisionUseCase) buildValidatorInfo(nodes []*ports.NodeMetadata, acco
 		}
 
 		uc.logger.Debug("Built validator %d: moniker=%s, operator=%s", i, node.Name, valoperAddr)
+		printLoopProgress(uc.logger, "Building validator metadata", i+1, len(nodes))
 	}
 
 	return validators, nil
@@ -640,8 +701,9 @@ func (uc *ProvisionUseCase) configureNodes(ctx context.Context, nodes []*ports.N
 	// Build persistent peers string: node_id@127.0.0.1:p2p_port,...
 	persistentPeers := uc.buildPersistentPeers(nodes)
 	uc.logger.Debug("Built persistent peers: %s", persistentPeers)
+	stopSpinnerIfSupported(uc.logger)
 
-	for _, node := range nodes {
+	for i, node := range nodes {
 		opts := ports.NodeConfigOptions{
 			ChainID:         chainID,
 			Ports:           node.Ports,
@@ -676,6 +738,8 @@ func (uc *ProvisionUseCase) configureNodes(ctx context.Context, nodes []*ports.N
 			}
 			uc.logger.Debug("Merged app.toml for node %d", node.Index)
 		}
+
+		printLoopProgress(uc.logger, "Applying node config overrides", i+1, len(nodes))
 	}
 
 	uc.logger.Debug("All nodes configured successfully")
@@ -730,29 +794,46 @@ func (uc *ProvisionUseCase) buildPersistentPeers(nodes []*ports.NodeMetadata) st
 // 4. Export genesis from snapshot state
 // 5. Return exported genesis
 func (uc *ProvisionUseCase) exportGenesisFromSnapshot(ctx context.Context, input dto.ProvisionInput, rpcGenesis []byte) ([]byte, error) {
-	// Validate binary path
-	if input.BinaryPath == "" {
-		return nil, fmt.Errorf("binary path is required for snapshot-based export")
+	binaryPath := strings.TrimSpace(input.BinaryPath)
+	dockerImage := strings.TrimSpace(input.DockerImage)
+	binaryName := ""
+	dockerHomeDir := ""
+	if uc.networkModule != nil {
+		if dockerImage == "" {
+			dockerImage = strings.TrimSpace(uc.networkModule.DockerImage())
+		}
+		binaryName = strings.TrimSpace(uc.networkModule.BinaryName())
+		dockerHomeDir = strings.TrimSpace(uc.networkModule.DockerHomeDir())
 	}
 
-	// Get snapshot URL from plugin
-	snapshotURL := input.SnapshotURL
-	if snapshotURL == "" && uc.networkModule != nil {
-		snapshotURL = uc.networkModule.SnapshotURL(input.Network)
+	// Snapshot export requires either a local binary or a docker image.
+	if binaryPath == "" && dockerImage == "" {
+		return nil, fmt.Errorf("snapshot export requires binary path or docker image")
 	}
+
+	// Resolve snapshot URL (CLI override or plugin default).
+	snapshotURL := uc.resolveSnapshotURL(input)
 	if snapshotURL == "" {
 		return nil, fmt.Errorf("no snapshot URL available for network: %s", input.Network)
 	}
+
+	cacheKey := fmt.Sprintf("%s-%s", input.BlockchainNetwork, input.Network)
 
 	// Step 1: Download snapshot with caching
 	// Cached snapshots are stored in ~/.devnet-builder/snapshots/<cacheKey>/
 	// Cache expires after 30 minutes by default
 	// Cache key format: "plugin-network" (e.g., "stable-mainnet", "ault-testnet")
-	cacheKey := fmt.Sprintf("%s-%s", input.BlockchainNetwork, input.Network)
 	uc.logger.Info("Downloading snapshot from %s...", snapshotURL)
-	snapshotPath, fromCache, err := uc.snapshotSvc.DownloadWithCache(ctx, snapshotURL, cacheKey, input.NoCache)
+	downloadCtx := ctx
+	cancelDownload := func() {}
+	if input.SnapshotDownloadTimeout > 0 {
+		downloadCtx, cancelDownload = context.WithTimeout(ctx, input.SnapshotDownloadTimeout)
+	}
+	defer cancelDownload()
+
+	snapshotPath, fromCache, err := uc.snapshotSvc.DownloadWithCache(downloadCtx, snapshotURL, cacheKey, input.NoCache)
 	if err != nil {
-		return nil, fmt.Errorf("failed to download snapshot: %w", err)
+		return nil, fmt.Errorf("failed to download snapshot from %s: %w", snapshotURL, err)
 	}
 	if fromCache {
 		uc.logger.Success("Using cached snapshot")
@@ -797,7 +878,10 @@ func (uc *ProvisionUseCase) exportGenesisFromSnapshot(ctx context.Context, input
 	uc.logger.Info("Exporting genesis from snapshot state...")
 	exportOpts := ports.StateExportOptions{
 		HomeDir:           exportDir,
-		BinaryPath:        input.BinaryPath,
+		BinaryPath:        binaryPath,
+		DockerImage:       dockerImage,
+		BinaryName:        binaryName,
+		DockerHomeDir:     dockerHomeDir,
 		RpcGenesis:        rpcGenesis,
 		ExportOpts:        uc.stateExportSvc.DefaultExportOptions(),
 		Network:           input.Network, // Keep for backward compatibility
@@ -845,11 +929,26 @@ func (uc *ProvisionUseCase) modifyGenesisViaFile(ctx context.Context, genesis []
 	// Define output path
 	outputPath := filepath.Join(tmpDir, "genesis_output.json")
 
+	// Show file-size-based progress while plugin writes the modified genesis.
+	// This keeps memory stable and gives feedback for multi-GB file-based mutation.
+	stopSpinnerIfSupported(uc.logger)
+	stopProgress := streamFileProgress(
+		ctx,
+		uc.logger,
+		"Patching genesis",
+		int64(len(genesis)),
+		time.Second,
+		outputPath+".tmp",
+		outputPath,
+	)
+	defer stopProgress()
+
 	// Call file-based modification via plugin
 	outputSize, err := fileModifier.ModifyGenesisFile(inputPath, outputPath, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to modify genesis via file: %w", err)
 	}
+	stopProgress()
 	uc.logger.Debug("Genesis modified via file (output size: %d bytes)", outputSize)
 
 	// Read modified genesis

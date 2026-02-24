@@ -54,7 +54,7 @@ func (f *FetcherAdapter) Download(ctx context.Context, url string, destPath stri
 
 // DownloadWithCache downloads a snapshot with caching support.
 // If a valid cached snapshot exists, returns the cached path without downloading.
-// The cache is stored in ~/.devnet-builder/snapshots/<cacheKey>/ with 30-minute expiration.
+// The cache is stored in ~/.devnet-builder/snapshots/<cacheKey>/ with default expiration.
 // cacheKey format: "plugin-network" (e.g., "stable-mainnet", "ault-testnet")
 func (f *FetcherAdapter) DownloadWithCache(ctx context.Context, url, cacheKey string, noCache bool) (string, bool, error) {
 	// Check cache first (unless noCache is set)
@@ -96,7 +96,7 @@ func (f *FetcherAdapter) DownloadWithCache(ctx context.Context, url, cacheKey st
 
 // DownloadWithProgress downloads a snapshot with caching support and progress reporting.
 // If a valid cached snapshot exists, returns the cached path without downloading.
-// The cache is stored in ~/.devnet-builder/snapshots/<cacheKey>/ with 30-minute expiration.
+// The cache is stored in ~/.devnet-builder/snapshots/<cacheKey>/ with default expiration.
 // cacheKey format: "plugin-network" (e.g., "stable-mainnet", "ault-testnet")
 func (f *FetcherAdapter) DownloadWithProgress(ctx context.Context, url, cacheKey string, noCache bool, progress ports.ProgressReporter) (string, bool, error) {
 	// Check cache first (unless noCache is set)
