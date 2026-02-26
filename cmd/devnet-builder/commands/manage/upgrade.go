@@ -15,6 +15,7 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/application"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
+	cmdvalidation "github.com/altuslabsxyz/devnet-builder/internal/cmd/validation"
 	"github.com/altuslabsxyz/devnet-builder/internal/di"
 	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/binary"
 	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/cache"
@@ -133,7 +134,8 @@ Resume options (for interrupted upgrades):
 
   # Resume from a specific stage (advanced)
   devnet-builder upgrade --resume --resume-from SwitchingBinary`,
-		RunE: runUpgrade,
+		PreRunE: preRunUpgrade,
+		RunE:    runUpgrade,
 	}
 
 	// Version selection flags
@@ -163,6 +165,27 @@ Resume options (for interrupted upgrades):
 	cmd.Flags().BoolVar(&upgradeShowStatus, "show-status", false, "Show current upgrade state and exit")
 
 	return cmd
+}
+
+func preRunUpgrade(cmd *cobra.Command, args []string) error {
+	if upgradeMode != "" {
+		if err := cmdvalidation.ValidateMode(upgradeMode); err != nil {
+			return err
+		}
+	}
+
+	if _, err := time.ParseDuration(votingPeriod); err != nil {
+		return fmt.Errorf("invalid voting period: %w", err)
+	}
+
+	if upgradeResumeFrom != "" {
+		targetStage := ports.ResumableStage(upgradeResumeFrom)
+		if !isValidStage(targetStage) {
+			return fmt.Errorf("invalid stage: %s", upgradeResumeFrom)
+		}
+	}
+
+	return nil
 }
 
 // UpgradeResultJSON represents the JSON output for the upgrade command.
@@ -256,13 +279,8 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	resolvedMode := UpgradeExecutionMode(cleanMetadata.ExecutionMode)
 	modeExplicitlySet := false
 	if upgradeMode != "" {
-		switch UpgradeExecutionMode(upgradeMode) {
-		case UpgradeModeDocker, UpgradeModeLocal:
-			resolvedMode = UpgradeExecutionMode(upgradeMode)
-			modeExplicitlySet = true
-		default:
-			return fmt.Errorf("invalid mode %q: must be 'docker' or 'local'", upgradeMode)
-		}
+		resolvedMode = UpgradeExecutionMode(upgradeMode)
+		modeExplicitlySet = true
 	}
 
 	// Mode validation against --image/--binary flags

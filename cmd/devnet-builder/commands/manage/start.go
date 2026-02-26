@@ -8,6 +8,7 @@ import (
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
+	cmdvalidation "github.com/altuslabsxyz/devnet-builder/internal/cmd/validation"
 	"github.com/altuslabsxyz/devnet-builder/internal/output"
 	"github.com/altuslabsxyz/devnet-builder/types"
 	"github.com/altuslabsxyz/devnet-builder/types/ctxconfig"
@@ -60,7 +61,8 @@ Examples:
 
   # Start with custom health timeout
   devnet-builder start --health-timeout 10m`,
-		RunE: runStart,
+		PreRunE: preRunStart,
+		RunE:    runStart,
 	}
 
 	cmd.Flags().StringVarP(&upMode, "mode", "m", "",
@@ -73,6 +75,13 @@ Examples:
 		"Network repository version. If not specified, uses init version")
 
 	return cmd
+}
+
+func preRunStart(cmd *cobra.Command, args []string) error {
+	if upMode == "" {
+		return nil
+	}
+	return cmdvalidation.ValidateMode(upMode)
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
@@ -92,11 +101,6 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Apply environment variables
 	if version := os.Getenv("NETWORK_VERSION"); version != "" && !cmd.Flags().Changed("network-version") {
 		upStableVersion = version
-	}
-
-	// Validate mode if specified
-	if upMode != "" && !types.ExecutionMode(upMode).IsValid() {
-		return outputStartErrorWithMode(fmt.Errorf("invalid mode: %s (must be 'docker' or 'local')", upMode), jsonMode)
 	}
 
 	// Initialize service

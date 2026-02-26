@@ -8,6 +8,7 @@ import (
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
+	cmdvalidation "github.com/altuslabsxyz/devnet-builder/internal/cmd/validation"
 	"github.com/altuslabsxyz/devnet-builder/internal/config"
 	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/network"
 	"github.com/altuslabsxyz/devnet-builder/internal/output"
@@ -70,7 +71,8 @@ Examples:
 
   # After initializing, modify config then run:
   devnet-builder start`,
-		RunE: runInit,
+		PreRunE: preRunInit,
+		RunE:    runInit,
 	}
 
 	cmd.Flags().StringVarP(&initNetwork, "network", "n", "mainnet",
@@ -89,6 +91,28 @@ Examples:
 		"Blockchain network module (stable, ault)")
 
 	return cmd
+}
+
+func preRunInit(cmd *cobra.Command, args []string) error {
+	if cmd.Flags().Changed("network") {
+		if err := cmdvalidation.ValidateNetworkSource(initNetwork); err != nil {
+			return err
+		}
+	}
+
+	if cmd.Flags().Changed("mode") {
+		if err := cmdvalidation.ValidateMode(initMode); err != nil {
+			return err
+		}
+	}
+
+	if cmd.Flags().Changed("validators") {
+		if err := cmdvalidation.ValidateValidatorsRange(initValidators, 1, 4); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -160,15 +184,15 @@ func runInit(cmd *cobra.Command, args []string) error {
 		initAccounts = *effectiveCfg.Accounts
 	}
 
-	// Validate inputs
-	if !types.NetworkSource(initNetwork).IsValid() {
-		return outputInitError(fmt.Errorf("invalid network: %s (must be 'mainnet' or 'testnet')", initNetwork), jsonMode)
+	// Validate inputs after config resolution.
+	if err := cmdvalidation.ValidateNetworkSource(initNetwork); err != nil {
+		return outputInitError(err, jsonMode)
 	}
-	if initValidators < 1 || initValidators > 4 {
-		return outputInitError(fmt.Errorf("invalid validators: %d (must be 1-4)", initValidators), jsonMode)
+	if err := cmdvalidation.ValidateValidatorsRange(initValidators, 1, 4); err != nil {
+		return outputInitError(err, jsonMode)
 	}
-	if !types.ExecutionMode(initMode).IsValid() {
-		return outputInitError(fmt.Errorf("invalid mode: %s (must be 'docker' or 'local')", initMode), jsonMode)
+	if err := cmdvalidation.ValidateMode(initMode); err != nil {
+		return outputInitError(err, jsonMode)
 	}
 	// Validate blockchain network module exists
 	if !network.Has(initBlockchainNetwork) {

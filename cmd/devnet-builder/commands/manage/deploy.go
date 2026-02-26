@@ -13,6 +13,7 @@ import (
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
+	cmdvalidation "github.com/altuslabsxyz/devnet-builder/internal/cmd/validation"
 	"github.com/altuslabsxyz/devnet-builder/internal/config"
 	"github.com/altuslabsxyz/devnet-builder/internal/di"
 	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/binary"
@@ -104,7 +105,8 @@ Examples:
   # Deploy with different binary versions for export and start
   # (useful when export requires a specific version for state compatibility)
   devnet-builder deploy --mode local --start-version v1.2.3 --export-version v1.1.0`,
-		RunE: runDeploy,
+		PreRunE: preRunDeploy,
+		RunE:    runDeploy,
 	}
 
 	// Command flags
@@ -145,6 +147,45 @@ Examples:
 		"Fork live network state (export genesis from snapshot)")
 
 	return cmd
+}
+
+func preRunDeploy(cmd *cobra.Command, args []string) error {
+	if cmd.Flags().Changed("network") {
+		if err := cmdvalidation.ValidateNetworkSource(deployNetwork); err != nil {
+			return err
+		}
+	}
+
+	if cmd.Flags().Changed("mode") {
+		if err := cmdvalidation.ValidateMode(deployMode); err != nil {
+			return err
+		}
+	}
+
+	if cmd.Flags().Changed("validators") {
+		mode := resolveDeployModeForValidation(cmd)
+		if err := cmdvalidation.ValidateValidatorsForMode(mode, deployValidators); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func resolveDeployModeForValidation(cmd *cobra.Command) string {
+	mode := deployMode
+
+	cfg := ctxconfig.FromContext(cmd.Context())
+	fileCfg := cfg.FileConfig()
+	if fileCfg != nil && fileCfg.ExecutionMode != nil && !cmd.Flags().Changed("mode") {
+		mode = string(*fileCfg.ExecutionMode)
+	}
+
+	if envMode := os.Getenv("DEVNET_MODE"); envMode != "" && !cmd.Flags().Changed("mode") {
+		mode = envMode
+	}
+
+	return mode
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
@@ -289,21 +330,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Validate inputs
-	if !types.NetworkSource(deployNetwork).IsValid() {
-		return fmt.Errorf("invalid network: %s (must be 'mainnet' or 'testnet')", deployNetwork)
+	// Validate inputs after config resolution.
+	if err := cmdvalidation.ValidateNetworkSource(deployNetwork); err != nil {
+		return err
 	}
-	// Validate validator count based on mode
-	if deployMode == string(types.ExecutionModeDocker) {
-		if deployValidators < 1 || deployValidators > 100 {
-			return fmt.Errorf("invalid validators: %d (must be 1-100 for docker mode)", deployValidators)
-		}
-	} else if deployMode == string(types.ExecutionModeLocal) {
-		if deployValidators < 1 || deployValidators > 4 {
-			return fmt.Errorf("invalid validators: %d (must be 1-4 for local mode)", deployValidators)
-		}
-	} else {
-		return fmt.Errorf("invalid mode: %s (must be 'docker' or 'local')", deployMode)
+	if err := cmdvalidation.ValidateValidatorsForMode(deployMode, deployValidators); err != nil {
+		return err
 	}
 
 	// Validate port availability for local mode before proceeding

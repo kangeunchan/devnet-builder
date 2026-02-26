@@ -3,7 +3,10 @@ package manage
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestValidateBinaryPath_ValidExecutable(t *testing.T) {
@@ -128,5 +131,77 @@ func TestValidateBinaryPath_PathWithSpaces(t *testing.T) {
 	}
 	if !filepath.IsAbs(result) {
 		t.Errorf("validateBinaryPath() should return absolute path, got: %s", result)
+	}
+}
+
+func TestDeployPreRunInvalidModeStopsRunE(t *testing.T) {
+	cmd := NewDeployCmd()
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--mode", "invalid"})
+
+	runCalled := false
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		runCalled = true
+		return nil
+	}
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected error for invalid mode")
+	}
+	if !strings.Contains(err.Error(), "invalid mode") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if runCalled {
+		t.Fatalf("RunE should not be called when PreRunE validation fails")
+	}
+}
+
+func TestStartPreRunInvalidModeStopsRunE(t *testing.T) {
+	cmd := NewStartCmd()
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--mode", "invalid"})
+
+	runCalled := false
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		runCalled = true
+		return nil
+	}
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected error for invalid mode")
+	}
+	if !strings.Contains(err.Error(), "invalid mode") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if runCalled {
+		t.Fatalf("RunE should not be called when PreRunE validation fails")
+	}
+}
+
+func TestUpgradePreRunInvalidVotingPeriodStopsRunE(t *testing.T) {
+	cmd := NewUpgradeCmd()
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--voting-period", "not-a-duration"})
+
+	runCalled := false
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		runCalled = true
+		return nil
+	}
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected error for invalid voting period")
+	}
+	if !strings.Contains(err.Error(), "invalid voting period") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if runCalled {
+		t.Fatalf("RunE should not be called when PreRunE validation fails")
 	}
 }
