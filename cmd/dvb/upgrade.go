@@ -50,18 +50,10 @@ func newUpgradeCreateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			// Resolve devnet from context if not provided
 			ns, devnetName, err := resolveWithSuggestions(devnet, namespace)
 			if err != nil {
 				return err
-			}
-
-			if upgradeName == "" {
-				return fmt.Errorf("--upgrade-name is required")
 			}
 
 			printContextHeader(devnet, currentContext)
@@ -125,10 +117,6 @@ func newUpgradeListCmd() *cobra.Command {
 		Short:   "List upgrades",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			upgrades, err := daemonClient.ListUpgrades(cmd.Context(), namespace)
 			if err != nil {
 				return err
@@ -183,10 +171,6 @@ func newUpgradeStatusCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			upgrade, err := daemonClient.GetUpgrade(cmd.Context(), namespace, name)
 			if err != nil {
 				return err
@@ -211,10 +195,6 @@ func newUpgradeCancelCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-
-			if err := requireDaemon(); err != nil {
-				return err
-			}
 
 			upgrade, err := daemonClient.CancelUpgrade(cmd.Context(), namespace, name)
 			if err != nil {
@@ -242,10 +222,6 @@ func newUpgradeRetryCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-
-			if err := requireDaemon(); err != nil {
-				return err
-			}
 
 			upgrade, err := daemonClient.RetryUpgrade(cmd.Context(), namespace, name)
 			if err != nil {
@@ -276,10 +252,6 @@ func newUpgradeDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-
-			if err := requireDaemon(); err != nil {
-				return err
-			}
 
 			if !force && !ShouldSkipConfirm() {
 				fmt.Printf("Are you sure you want to delete upgrade %q? [y/N] ", name)

@@ -14,6 +14,7 @@ import (
 
 	v1 "github.com/altuslabsxyz/devnet-builder/api/proto/gen/v1"
 	"github.com/altuslabsxyz/devnet-builder/internal/client"
+	cmdvalidation "github.com/altuslabsxyz/devnet-builder/internal/cmd/validation"
 	"github.com/altuslabsxyz/devnet-builder/internal/config"
 	"github.com/altuslabsxyz/devnet-builder/internal/dvbcontext"
 	"github.com/altuslabsxyz/devnet-builder/internal/output"
@@ -74,7 +75,7 @@ Use --list-plugins to see available networks.
 
 Run without arguments for an interactive wizard experience.
 
-Examples:
+		Examples:
   # List available network plugins
   dvb provision --list-plugins
 
@@ -98,6 +99,7 @@ Examples:
   # Preview changes without applying (dry-run)
   dvb provision --name my-devnet --network stable --dry-run
   dvb provision -f devnet.yaml --dry-run`,
+		PreRunE: preRunProvision(opts),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// List plugins mode
 			if opts.listPlugins {
@@ -170,16 +172,42 @@ func detectProvisionMode(opts *provisionOptions) ProvisionMode {
 	return InteractiveMode
 }
 
+func preRunProvision(opts *provisionOptions) func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		mode := detectProvisionMode(opts)
+		if mode != FlagMode {
+			return nil
+		}
+
+		return validateFlagModeOptions(opts)
+	}
+}
+
+func validateFlagModeOptions(opts *provisionOptions) error {
+	if !opts.quick && opts.name == "" {
+		return fmt.Errorf("--name is required in flag mode")
+	}
+	if opts.network == "" {
+		return fmt.Errorf("--network is required in flag mode")
+	}
+	if err := cmdvalidation.ValidateAtLeast("validators", opts.validators, 1); err != nil {
+		return err
+	}
+	if err := cmdvalidation.ValidateNonNegative("full-nodes", opts.fullNodes); err != nil {
+		return err
+	}
+	if err := cmdvalidation.ValidateMode(opts.mode); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // runInteractiveMode handles interactive wizard mode
 func runInteractiveMode(ctx context.Context, opts *provisionOptions) error {
 	// Interactive mode requires a TTY
 	if IsNonInteractive() {
 		return fmt.Errorf("interactive wizard requires a terminal\n\nUse flags instead:\n  dvb provision --name my-devnet --network stable\n\nOr use a YAML file:\n  dvb provision -f devnet.yaml\n\nOr use quick mode:\n  dvb provision --quick")
-	}
-
-	// Require daemon to be running
-	if err := requireDaemon(); err != nil {
-		return err
 	}
 
 	// Run the wizard to collect options
@@ -216,11 +244,6 @@ func runInteractiveMode(ctx context.Context, opts *provisionOptions) error {
 
 // runFlagMode handles flag-based provisioning
 func runFlagMode(ctx context.Context, opts *provisionOptions) error {
-	// Require daemon to be running
-	if err := requireDaemon(); err != nil {
-		return err
-	}
-
 	// Quick mode: apply smart defaults for unset values
 	if opts.quick {
 		if opts.name == "" {
@@ -236,23 +259,9 @@ func runFlagMode(ctx context.Context, opts *provisionOptions) error {
 		}
 	}
 
-	// Validate required flags
-	if opts.name == "" {
-		return fmt.Errorf("--name is required in flag mode")
-	}
-	if opts.network == "" {
-		return fmt.Errorf("--network is required in flag mode")
-	}
-
-	// Validate options
-	if opts.validators < 1 {
-		return fmt.Errorf("--validators must be at least 1")
-	}
-	if opts.fullNodes < 0 {
-		return fmt.Errorf("--full-nodes cannot be negative")
-	}
-	if opts.mode != "docker" && opts.mode != "local" {
-		return fmt.Errorf("--mode must be 'docker' or 'local'")
+	// Validate options after quick-mode defaults are applied.
+	if err := validateFlagModeOptions(opts); err != nil {
+		return err
 	}
 
 	// Build devnet spec
@@ -277,11 +286,6 @@ func runFlagMode(ctx context.Context, opts *provisionOptions) error {
 
 // runFileMode handles file-based provisioning
 func runFileMode(ctx context.Context, opts *provisionOptions) error {
-	// Require daemon to be running
-	if err := requireDaemon(); err != nil {
-		return err
-	}
-
 	// Load and validate the YAML file
 	loader := config.NewYAMLLoader()
 	devnets, err := loader.LoadFile(opts.file)

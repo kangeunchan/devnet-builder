@@ -38,7 +38,7 @@ Examples:
 		newDaemonStatusCmd(),
 		newDaemonLogsCmd(),
 		newDaemonWhoAmICmd(),
-		newPluginsCmd(),
+		markDaemonRequired(newPluginsCmd()),
 	)
 
 	return cmd

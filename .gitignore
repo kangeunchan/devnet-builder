@@ -53,4 +53,4 @@ docs/plans/
 *.test
 .serena/
 
-devnet-builder
+/devnet-builder

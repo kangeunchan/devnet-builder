@@ -163,10 +163,6 @@ Examples:
   dvb node list --wide`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			var explicitDevnet string
 			if len(args) > 0 {
 				explicitDevnet = args[0]
@@ -445,10 +441,6 @@ Examples:
   dvb node get my-devnet validator-0`,
 		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			explicitDevnet, nodeNameArg := resolveNodeArgs(args)
 
 			ns, devnetName, err := resolveWithSuggestions(explicitDevnet, namespace)
@@ -515,10 +507,6 @@ Examples:
   dvb node health my-devnet fullnode-0`,
 		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			explicitDevnet, nodeNameArg := resolveNodeArgs(args)
 
 			ns, devnetName, err := resolveWithSuggestions(explicitDevnet, namespace)
@@ -578,10 +566,6 @@ Examples:
   dvb node ports my-devnet fullnode-0`,
 		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			explicitDevnet, nodeNameArg := resolveNodeArgs(args)
 
 			ns, devnetName, err := resolveWithSuggestions(explicitDevnet, namespace)
@@ -672,10 +656,6 @@ Examples:
   dvb node start my-devnet validator-0`,
 		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			explicitDevnet, nodeNameArg := resolveNodeArgs(args)
 
 			ns, devnetName, err := resolveWithSuggestions(explicitDevnet, namespace)
@@ -794,10 +774,6 @@ Examples:
   dvb node stop my-devnet validator-0`,
 		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			explicitDevnet, nodeNameArg := resolveNodeArgs(args)
 
 			ns, devnetName, err := resolveWithSuggestions(explicitDevnet, namespace)
@@ -882,10 +858,6 @@ Examples:
   dvb node restart my-devnet validator-0`,
 		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			explicitDevnet, nodeNameArg := resolveNodeArgs(args)
 
 			ns, devnetName, err := resolveWithSuggestions(explicitDevnet, namespace)
@@ -993,10 +965,6 @@ Examples:
   dvb node exec validator-0 --timeout 60 -- stabled query bank balances cosmos1...`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			// Find the -- separator position
 			dashDashPos := -1
 			for i, arg := range args {

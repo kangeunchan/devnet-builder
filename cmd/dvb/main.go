@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/client"
+	cmdvalidation "github.com/altuslabsxyz/devnet-builder/internal/cmd/validation"
 	"github.com/altuslabsxyz/devnet-builder/internal/daemon/types"
 	"github.com/altuslabsxyz/devnet-builder/internal/dvbcontext"
 	"github.com/altuslabsxyz/devnet-builder/internal/output"
@@ -109,6 +110,10 @@ func main() {
 
 			// Skip if standalone mode
 			if standalone {
+				currentContext, _ = dvbcontext.Load()
+				if commandRequiresDaemon(cmd) {
+					return cmdvalidation.RequireDaemonConnected(false)
+				}
 				return nil
 			}
 
@@ -168,6 +173,10 @@ func main() {
 			// Load context (ignore errors, context is optional)
 			currentContext, _ = dvbcontext.Load()
 
+			if commandRequiresDaemon(cmd) {
+				return validateDaemonRequirement(cmd)
+			}
+
 			return nil
 		},
 		PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
@@ -192,15 +201,15 @@ func main() {
 		newDaemonCmd(),
 		newUseCmd(),
 		newStatusCmd(),
-		newGetCmd(),
+		markDaemonRequired(newGetCmd()),
 		newDeleteCmd(),
-		newListCmd(),
-		newNodeCmd(),
-		newUpgradeCmd(),
-		newTxCmd(),
-		newGovCmd(),
+		markDaemonRequired(newListCmd()),
+		markDaemonRequired(newNodeCmd()),
+		markDaemonRequired(newUpgradeCmd()),
+		markDaemonRequired(newTxCmd()),
+		markDaemonRequired(newGovCmd()),
 		newGenesisCmd(),
-		newProvisionCmd(),
+		markDaemonRequired(newProvisionCmd()),
 		newConfigCmd(),
 		newCompletionCmd(),
 		newDeprecatedStartCmd(),
@@ -273,10 +282,6 @@ func newListCmd() *cobra.Command {
 		Short:   "List all devnets",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireDaemon(); err != nil {
-				return err
-			}
-
 			devnets, err := daemonClient.ListDevnets(cmd.Context(), namespace)
 			if err != nil {
 				return err
