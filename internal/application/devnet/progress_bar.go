@@ -20,6 +20,29 @@ func stopSpinnerIfSupported(logger ports.Logger) {
 	}
 }
 
+type spinnerController interface {
+	StopSpinner()
+	SetAutoSpinner(enabled bool)
+	AutoSpinnerEnabled() bool
+}
+
+func suspendAutoSpinnerIfSupported(logger ports.Logger) func() {
+	controller, ok := logger.(spinnerController)
+	if !ok {
+		stopSpinnerIfSupported(logger)
+		return func() {}
+	}
+
+	prev := controller.AutoSpinnerEnabled()
+	controller.SetAutoSpinner(false)
+	controller.StopSpinner()
+
+	return func() {
+		controller.StopSpinner()
+		controller.SetAutoSpinner(prev)
+	}
+}
+
 func printLoopProgress(logger ports.Logger, label string, current, total int) {
 	if logger == nil || total <= 0 {
 		return
@@ -94,12 +117,24 @@ func printByteProgress(logger ports.Logger, label string, current, total int64, 
 		}
 	}
 
+	label = strings.TrimSpace(label)
+
 	if total > 0 {
-		logger.Print("\r%s [%s] %5.1f%% | %.1f/%.1f MB | %.1f MB/s | ETA: %s",
-			label, bar, percent, currentMB, totalMB, speedMB, etaText)
+		if label == "" {
+			logger.Print("\r  %s %5.1f%% | %.1f/%.1f MB | %.1f MB/s | ETA: %s",
+				bar, percent, currentMB, totalMB, speedMB, etaText)
+		} else {
+			logger.Print("\r%s... %s %5.1f%% | %.1f/%.1f MB | %.1f MB/s | ETA: %s",
+				label, bar, percent, currentMB, totalMB, speedMB, etaText)
+		}
 	} else {
-		logger.Print("\r%s [%-30s] %.1f MB | %.1f MB/s",
-			label, bar, currentMB, speedMB)
+		if label == "" {
+			logger.Print("\r  %-30s %.1f MB | %.1f MB/s",
+				bar, currentMB, speedMB)
+		} else {
+			logger.Print("\r%s... %-30s %.1f MB | %.1f MB/s",
+				label, bar, currentMB, speedMB)
+		}
 	}
 
 	if total > 0 && current >= total {
@@ -119,6 +154,7 @@ func streamFileProgress(ctx context.Context, logger ports.Logger, label string, 
 		interval = 500 * time.Millisecond
 	}
 
+	restoreSpinner := suspendAutoSpinnerIfSupported(logger)
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 
@@ -170,6 +206,7 @@ func streamFileProgress(ctx context.Context, logger ports.Logger, label string, 
 	return func() {
 		cancel()
 		<-done
+		restoreSpinner()
 	}
 }
 

@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	longFlagPattern = regexp.MustCompile(`--[a-zA-Z0-9][a-zA-Z0-9-]*`)
+	longFlagPattern = regexp.MustCompile(`--[a-zA-Z0-9][a-zA-Z0-9_-]*`)
 
 	dockerStartHelpCache sync.Map
 	localStartHelpCache  sync.Map

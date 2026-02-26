@@ -203,3 +203,12 @@ func (a *LoggerAdapter) SetVerbose(verbose bool) { a.logger.SetVerbose(verbose) 
 func (a *LoggerAdapter) IsVerbose() bool         { return a.logger.IsVerbose() }
 func (a *LoggerAdapter) Writer() io.Writer       { return a.logger.Writer() }
 func (a *LoggerAdapter) ErrWriter() io.Writer    { return a.logger.ErrWriter() }
+
+// StopSpinner delegates spinner stop for long-running progress sections.
+func (a *LoggerAdapter) StopSpinner() { a.logger.StopSpinner() }
+
+// SetAutoSpinner delegates auto spinner toggle.
+func (a *LoggerAdapter) SetAutoSpinner(enabled bool) { a.logger.SetAutoSpinner(enabled) }
+
+// AutoSpinnerEnabled reports current auto spinner state.
+func (a *LoggerAdapter) AutoSpinnerEnabled() bool { return a.logger.AutoSpinnerEnabled() }

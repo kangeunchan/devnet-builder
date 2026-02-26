@@ -74,7 +74,7 @@ func NewCosmosRPCClient(host string, port int) *CosmosRPCClient {
 // It derives the REST URL from the RPC URL by using port 1317.
 func NewCosmosRPCClientWithURL(url string) *CosmosRPCClient {
 	// Extract host from URL and construct REST URL with port 1317
-	restURL := "http://localhost:1317" // Default fallback
+	restURL := "http://127.0.0.1:1317" // Default fallback
 	if len(url) > 7 {                  // http://
 		// Try to parse and replace port
 		// Format: http://host:port
