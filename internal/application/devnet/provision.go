@@ -310,6 +310,7 @@ func calculateNodePorts(basePorts ports.PortConfig, index int) ports.PortConfig 
 func (uc *ProvisionUseCase) initializeNodes(ctx context.Context, input dto.ProvisionInput, chainID string) ([]*ports.NodeMetadata, error) {
 	nodes := make([]*ports.NodeMetadata, input.NumValidators)
 	defaultPorts := uc.networkModule.DefaultPorts()
+	stopSpinnerIfSupported(uc.logger)
 
 	for i := 0; i < input.NumValidators; i++ {
 		nodeDir := paths.NodePath(input.HomeDir, i)
@@ -323,6 +324,7 @@ func (uc *ProvisionUseCase) initializeNodes(ctx context.Context, input dto.Provi
 		// Initialize the node (creates priv_validator_key.json)
 		uc.logger.Debug("Initializing node %d at %s with chainID %s", i, nodeDir, chainID)
 		if err := uc.nodeInitializer.Initialize(ctx, nodeDir, moniker, chainID); err != nil {
+			uc.logger.Println("")
 			return nil, fmt.Errorf("failed to initialize node %d: %w", i, err)
 		}
 
@@ -340,6 +342,8 @@ func (uc *ProvisionUseCase) initializeNodes(ctx context.Context, input dto.Provi
 			NodeID:  nodeID,
 			Ports:   calculateNodePorts(defaultPorts, i),
 		}
+
+		printLoopProgress(uc.logger, "Initializing nodes", i+1, input.NumValidators)
 	}
 
 	return nodes, nil
@@ -426,6 +430,7 @@ func hexToBytes(hexStr string) ([]byte, error) {
 // If useTestMnemonic is true, deterministic test mnemonics are used for reproducible testing.
 func (uc *ProvisionUseCase) createAccountKeys(ctx context.Context, accountsDir string, numValidators int, useTestMnemonic bool) ([]*ports.AccountKeyInfo, error) {
 	keys := make([]*ports.AccountKeyInfo, numValidators)
+	stopSpinnerIfSupported(uc.logger)
 
 	for i := 0; i < numValidators; i++ {
 		keyName := fmt.Sprintf("validator%d", i)
@@ -451,6 +456,7 @@ func (uc *ProvisionUseCase) createAccountKeys(ctx context.Context, accountsDir s
 		}
 
 		keys[i] = keyInfo
+		printLoopProgress(uc.logger, "Creating validator keys", i+1, numValidators)
 	}
 
 	return keys, nil
@@ -502,6 +508,7 @@ func (uc *ProvisionUseCase) saveValidatorKeys(homeDir string, accountKeys []*por
 // The offset parameter allows starting key naming after validator keys (e.g., account0, account1...).
 func (uc *ProvisionUseCase) createAdditionalAccountKeys(ctx context.Context, accountsDir string, numAccounts int, useTestMnemonic bool, mnemonicOffset int) ([]*ports.AccountKeyInfo, error) {
 	keys := make([]*ports.AccountKeyInfo, numAccounts)
+	stopSpinnerIfSupported(uc.logger)
 
 	for i := 0; i < numAccounts; i++ {
 		keyName := fmt.Sprintf("account%d", i)
@@ -528,6 +535,7 @@ func (uc *ProvisionUseCase) createAdditionalAccountKeys(ctx context.Context, acc
 		}
 
 		keys[i] = keyInfo
+		printLoopProgress(uc.logger, "Creating test accounts", i+1, numAccounts)
 	}
 
 	return keys, nil
@@ -615,6 +623,7 @@ func (uc *ProvisionUseCase) buildValidatorInfo(nodes []*ports.NodeMetadata, acco
 	}
 
 	validators := make([]ports.ValidatorInfo, len(nodes))
+	stopSpinnerIfSupported(uc.logger)
 
 	for i, node := range nodes {
 		// Read consensus pubkey from priv_validator_key.json
@@ -651,6 +660,7 @@ func (uc *ProvisionUseCase) buildValidatorInfo(nodes []*ports.NodeMetadata, acco
 		}
 
 		uc.logger.Debug("Built validator %d: moniker=%s, operator=%s", i, node.Name, valoperAddr)
+		printLoopProgress(uc.logger, "Building validator metadata", i+1, len(nodes))
 	}
 
 	return validators, nil
@@ -691,8 +701,9 @@ func (uc *ProvisionUseCase) configureNodes(ctx context.Context, nodes []*ports.N
 	// Build persistent peers string: node_id@127.0.0.1:p2p_port,...
 	persistentPeers := uc.buildPersistentPeers(nodes)
 	uc.logger.Debug("Built persistent peers: %s", persistentPeers)
+	stopSpinnerIfSupported(uc.logger)
 
-	for _, node := range nodes {
+	for i, node := range nodes {
 		opts := ports.NodeConfigOptions{
 			ChainID:         chainID,
 			Ports:           node.Ports,
@@ -727,6 +738,8 @@ func (uc *ProvisionUseCase) configureNodes(ctx context.Context, nodes []*ports.N
 			}
 			uc.logger.Debug("Merged app.toml for node %d", node.Index)
 		}
+
+		printLoopProgress(uc.logger, "Applying node config overrides", i+1, len(nodes))
 	}
 
 	uc.logger.Debug("All nodes configured successfully")
@@ -811,7 +824,14 @@ func (uc *ProvisionUseCase) exportGenesisFromSnapshot(ctx context.Context, input
 	// Cache expires after 30 minutes by default
 	// Cache key format: "plugin-network" (e.g., "stable-mainnet", "ault-testnet")
 	uc.logger.Info("Downloading snapshot from %s...", snapshotURL)
-	snapshotPath, fromCache, err := uc.snapshotSvc.DownloadWithCache(ctx, snapshotURL, cacheKey, input.NoCache)
+	downloadCtx := ctx
+	cancelDownload := func() {}
+	if input.SnapshotDownloadTimeout > 0 {
+		downloadCtx, cancelDownload = context.WithTimeout(ctx, input.SnapshotDownloadTimeout)
+	}
+	defer cancelDownload()
+
+	snapshotPath, fromCache, err := uc.snapshotSvc.DownloadWithCache(downloadCtx, snapshotURL, cacheKey, input.NoCache)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download snapshot from %s: %w", snapshotURL, err)
 	}

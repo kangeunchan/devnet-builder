@@ -67,6 +67,7 @@ func (uc *RunUseCase) Execute(ctx context.Context, input dto.RunInput) (*dto.Run
 	// Start each node
 	statuses := make([]dto.NodeStatus, len(nodes))
 	allRunning := true
+	stopSpinnerIfSupported(uc.logger)
 
 	for i, node := range nodes {
 		uc.logger.Debug("Starting node %d...", node.Index)
@@ -81,6 +82,7 @@ func (uc *RunUseCase) Execute(ctx context.Context, input dto.RunInput) (*dto.Run
 				Name:      node.Name,
 				IsRunning: false,
 			}
+			printLoopProgress(uc.logger, "Starting nodes", i+1, len(nodes))
 			continue
 		}
 
@@ -96,6 +98,7 @@ func (uc *RunUseCase) Execute(ctx context.Context, input dto.RunInput) (*dto.Run
 			IsRunning: true,
 			PID:       &pid,
 		}
+		printLoopProgress(uc.logger, "Starting nodes", i+1, len(nodes))
 	}
 
 	// Wait for health if requested
