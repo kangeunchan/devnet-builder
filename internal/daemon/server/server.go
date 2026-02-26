@@ -26,6 +26,7 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/daemon/subnet"
 	"github.com/altuslabsxyz/devnet-builder/internal/daemon/types"
 	"github.com/altuslabsxyz/devnet-builder/internal/daemon/upgrader"
+	"go.uber.org/multierr"
 	"google.golang.org/grpc"
 )
 
@@ -107,16 +108,58 @@ type Server struct {
 	shutdownCancel context.CancelFunc
 }
 
+type ServerBuilder struct {
+	config *Config
+	server *Server
+
+	orchFactory *OrchestratorFactory
+	devnetProv  *provisioner.DevnetProvisioner
+
+	cleanupStack []func() error
+	err          error
+}
+
+// NewServerBuilder creates a new server builder.
+func NewServerBuilder(config *Config) *ServerBuilder {
+	return &ServerBuilder{
+		config: config,
+		server: &Server{config: config},
+	}
+}
+
 // New creates a new server.
 func New(config *Config) (*Server, error) {
-	// Ensure data directory exists first (needed for log file)
-	if err := os.MkdirAll(config.DataDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create data directory: %w", err)
+	return NewServerBuilder(config).
+		WithDataDir().
+		WithLogger().
+		WithPlugins().
+		WithStoreAndSubnet().
+		WithControllers().
+		WithRuntime().
+		WithGRPCServices().
+		Build()
+}
+
+// WithDataDir ensures the data directory exists.
+func (b *ServerBuilder) WithDataDir() *ServerBuilder {
+	if b.err != nil {
+		return b
 	}
 
-	// Set up logger - write to both stdout and log file for debugging
+	if err := os.MkdirAll(b.config.DataDir, 0755); err != nil {
+		b.err = fmt.Errorf("failed to create data directory: %w", err)
+	}
+	return b
+}
+
+// WithLogger initializes persistent logging.
+func (b *ServerBuilder) WithLogger() *ServerBuilder {
+	if b.err != nil {
+		return b
+	}
+
 	level := slog.LevelInfo
-	switch config.LogLevel {
+	switch b.config.LogLevel {
 	case "debug":
 		level = slog.LevelDebug
 	case "warn":
@@ -125,86 +168,126 @@ func New(config *Config) (*Server, error) {
 		level = slog.LevelError
 	}
 
-	// Create log file for persistent logging (used by 'dvb daemon logs')
-	logFilePath := filepath.Join(config.DataDir, "daemon.log")
+	logFilePath := filepath.Join(b.config.DataDir, "daemon.log")
 	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open daemon log file: %w", err)
+		b.err = fmt.Errorf("failed to open daemon log file: %w", err)
+		return b
 	}
 
-	// Write logs to both stdout and file
 	multiWriter := io.MultiWriter(os.Stdout, logFile)
-	logger := slog.New(slog.NewTextHandler(multiWriter, &slog.HandlerOptions{Level: level}))
+	b.server.logger = slog.New(slog.NewTextHandler(multiWriter, &slog.HandlerOptions{Level: level}))
+	b.server.logFile = logFile
+	b.pushCleanup(func() error { return logFile.Close() })
+	return b
+}
 
-	// Load network plugins from plugin directories
-	// Plugins are discovered from ~/.devnet-builder/plugins/ and registered
-	// with the global network registry so they can be queried via NetworkService
+// WithPlugins loads and registers network plugins.
+func (b *ServerBuilder) WithPlugins() *ServerBuilder {
+	if b.err != nil {
+		return b
+	}
+
 	pluginMgr := NewPluginManager(PluginManagerConfig{
-		PluginDirs: []string{filepath.Join(config.DataDir, "plugins")},
-		Logger:     logger,
+		PluginDirs: []string{filepath.Join(b.config.DataDir, "plugins")},
+		Logger:     b.server.logger,
 	})
 
 	result, err := pluginMgr.LoadAndRegister()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load plugins: %w", err)
+		b.err = fmt.Errorf("failed to load plugins: %w", err)
+		return b
 	}
 
 	if len(result.Loaded) > 0 {
-		logger.Info("network plugins loaded",
+		b.server.logger.Info("network plugins loaded",
 			"count", len(result.Loaded),
 			"plugins", result.Loaded)
 	}
 	if len(result.Errors) > 0 {
 		for _, e := range result.Errors {
-			logger.Warn("plugin load error",
+			b.server.logger.Warn("plugin load error",
 				"plugin", e.Name,
 				"error", e.Error)
 		}
 	}
 
-	// Open state store
-	dbPath := filepath.Join(config.DataDir, "devnetd.db")
+	b.server.pluginManager = pluginMgr
+	b.pushCleanup(func() error {
+		pluginMgr.Close()
+		return nil
+	})
+	return b
+}
+
+// WithStoreAndSubnet initializes state storage and subnet allocation.
+func (b *ServerBuilder) WithStoreAndSubnet() *ServerBuilder {
+	if b.err != nil {
+		return b
+	}
+
+	dbPath := filepath.Join(b.config.DataDir, "devnetd.db")
 	st, err := store.NewBoltStore(dbPath)
 	if err != nil {
-		pluginMgr.Close()
-		return nil, fmt.Errorf("failed to open state store: %w", err)
+		b.err = fmt.Errorf("failed to open state store: %w", err)
+		return b
 	}
 
-	// Initialize subnet allocator for loopback network aliasing
-	subnetAllocatorPath := filepath.Join(config.DataDir, "subnets.json")
+	b.server.store = st
+	b.pushCleanup(func() error { return st.Close() })
+
+	subnetAllocatorPath := filepath.Join(b.config.DataDir, "subnets.json")
 	subnetAlloc, err := subnet.LoadOrCreate(subnetAllocatorPath)
 	if err != nil {
-		st.Close()
-		pluginMgr.Close()
-		return nil, fmt.Errorf("failed to initialize subnet allocator: %w", err)
+		b.err = fmt.Errorf("failed to initialize subnet allocator: %w", err)
+		return b
 	}
-	logger.Info("subnet allocator initialized", "path", subnetAllocatorPath)
+	b.server.subnetAllocator = subnetAlloc
+	b.server.logger.Info("subnet allocator initialized", "path", subnetAllocatorPath)
+	return b
+}
 
-	// Create controller manager
+// WithControllers registers controller stack.
+func (b *ServerBuilder) WithControllers() *ServerBuilder {
+	if b.err != nil {
+		return b
+	}
+
+	b.setupControllerManager()
+	b.setupOrchestratorAndProvisioner()
+	b.registerDevnetController()
+	b.registerHealthController()
+	b.registerUpgradeController()
+	b.registerTransactionController()
+	return b
+}
+
+func (b *ServerBuilder) setupControllerManager() {
 	mgr := controller.NewManager()
-	mgr.SetLogger(logger)
+	mgr.SetLogger(b.server.logger)
+	b.server.manager = mgr
+}
 
-	// Create orchestrator factory for full provisioning flow (build, fork, init)
-	orchFactory := NewOrchestratorFactory(config.DataDir, logger)
-
-	// Create devnet provisioner with orchestrator factory and subnet allocator
-	// The factory enables full provisioning (build, fork, init) before creating Node resources
-	// The subnet allocator assigns unique loopback subnets to each devnet
-	devnetProv := provisioner.NewDevnetProvisioner(st, provisioner.Config{
-		DataDir:             config.DataDir,
-		Logger:              logger,
-		OrchestratorFactory: orchFactory,
-		SubnetAllocator:     subnetAlloc,
+func (b *ServerBuilder) setupOrchestratorAndProvisioner() {
+	b.orchFactory = NewOrchestratorFactory(b.config.DataDir, b.server.logger)
+	b.devnetProv = provisioner.NewDevnetProvisioner(b.server.store, provisioner.Config{
+		DataDir:             b.config.DataDir,
+		Logger:              b.server.logger,
+		OrchestratorFactory: b.orchFactory,
+		SubnetAllocator:     b.server.subnetAllocator,
 	})
+}
 
-	// Register controllers
-	devnetCtrl := controller.NewDevnetController(st, devnetProv)
-	devnetCtrl.SetLogger(logger)
-	devnetCtrl.SetManager(mgr)
-	mgr.Register("devnets", devnetCtrl)
+func (b *ServerBuilder) registerDevnetController() {
+	devnetCtrl := controller.NewDevnetController(b.server.store, b.devnetProv)
+	devnetCtrl.SetLogger(b.server.logger)
+	devnetCtrl.SetManager(b.server.manager)
+	b.server.manager.Register("devnets", devnetCtrl)
+	b.attachProvisionProgressReporter(devnetCtrl)
+}
 
-	// Wire step progress reporter to broadcast provision logs to CLI clients
-	devnetProv.SetStepProgressReporterFactory(func(namespace, name string) ports.ProgressReporter {
+func (b *ServerBuilder) attachProvisionProgressReporter(devnetCtrl *controller.DevnetController) {
+	b.devnetProv.SetStepProgressReporterFactory(func(namespace, name string) ports.ProgressReporter {
 		return ports.ProgressFunc(func(step ports.StepProgress) {
 			devnetCtrl.BroadcastProvisionLog(namespace, name, &controller.ProvisionLogEntry{
 				Timestamp:       time.Now(),
@@ -221,14 +304,44 @@ func New(config *Config) (*Server, error) {
 			})
 		})
 	})
+}
 
-	// Select node runtime based on RuntimeMode.
-	// Backward compat: --docker flag overrides RuntimeMode.
-	runtimeMode := config.RuntimeMode
+func (b *ServerBuilder) registerHealthController() {
+	healthChecker := checker.NewRPCHealthChecker(checker.Config{
+		Logger:  b.server.logger,
+		Timeout: b.config.HealthCheckTimeout,
+	})
+	healthConfig := controller.DefaultHealthControllerConfig()
+	healthCtrl := controller.NewHealthController(b.server.store, healthChecker, b.server.manager, healthConfig)
+	healthCtrl.SetLogger(b.server.logger)
+	b.server.manager.Register("health", healthCtrl)
+	b.server.healthCtrl = healthCtrl
+}
+
+func (b *ServerBuilder) registerUpgradeController() {
+	upgradeRuntime := upgrader.NewRuntime(b.server.store, upgrader.Config{Logger: b.server.logger})
+	upgradeCtrl := controller.NewUpgradeController(b.server.store, upgradeRuntime)
+	upgradeCtrl.SetLogger(b.server.logger)
+	b.server.manager.Register("upgrades", upgradeCtrl)
+}
+
+func (b *ServerBuilder) registerTransactionController() {
+	txCtrl := controller.NewTxController(b.server.store, nil)
+	txCtrl.SetLogger(b.server.logger)
+	b.server.manager.Register("transactions", txCtrl)
+}
+
+// WithRuntime initializes node runtime and registers node controller.
+func (b *ServerBuilder) WithRuntime() *ServerBuilder {
+	if b.err != nil {
+		return b
+	}
+
+	runtimeMode := b.config.RuntimeMode
 	if runtimeMode == "" {
 		runtimeMode = "process"
 	}
-	if config.EnableDocker {
+	if b.config.EnableDocker {
 		runtimeMode = "docker"
 	}
 
@@ -236,142 +349,144 @@ func New(config *Config) (*Server, error) {
 	switch runtimeMode {
 	case "docker":
 		dockerRuntime, err := runtime.NewDockerRuntime(runtime.DockerConfig{
-			DefaultImage: config.DockerImage,
-			Logger:       logger,
+			DefaultImage: b.config.DockerImage,
+			Logger:       b.server.logger,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to create docker runtime: %w", err)
+			b.err = fmt.Errorf("failed to create docker runtime: %w", err)
+			return b
 		}
 		nodeRuntime = dockerRuntime
-		logger.Info("docker runtime enabled", "image", config.DockerImage)
+		b.server.logger.Info("docker runtime enabled", "image", b.config.DockerImage)
 	case "service":
 		svcRuntime, err := runtime.NewServiceRuntime(runtime.ServiceRuntimeConfig{
-			DataDir:               config.DataDir,
-			Logger:                logger,
-			PluginRuntimeProvider: orchFactory.AsPluginRuntimeProvider(),
+			DataDir:               b.config.DataDir,
+			Logger:                b.server.logger,
+			PluginRuntimeProvider: b.orchFactory.AsPluginRuntimeProvider(),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to create service runtime: %w", err)
+			b.err = fmt.Errorf("failed to create service runtime: %w", err)
+			return b
 		}
 		nodeRuntime = svcRuntime
-		logger.Info("service runtime enabled (OS service manager)")
-	default: // "process"
+		b.server.logger.Info("service runtime enabled (OS service manager)")
+	default:
 		nodeRuntime = runtime.NewProcessRuntime(runtime.ProcessRuntimeConfig{
-			DataDir:               config.DataDir,
-			Logger:                logger,
-			PluginRuntimeProvider: orchFactory.AsPluginRuntimeProvider(),
+			DataDir:               b.config.DataDir,
+			Logger:                b.server.logger,
+			PluginRuntimeProvider: b.orchFactory.AsPluginRuntimeProvider(),
 		})
-		logger.Info("process runtime enabled for local mode")
+		b.server.logger.Info("process runtime enabled for local mode")
 	}
 
-	nodeCtrl := controller.NewNodeController(st, nodeRuntime)
-	nodeCtrl.SetLogger(logger)
-	mgr.Register("nodes", nodeCtrl)
+	b.server.nodeRuntime = nodeRuntime
+	nodeCtrl := controller.NewNodeController(b.server.store, nodeRuntime)
+	nodeCtrl.SetLogger(b.server.logger)
+	b.server.manager.Register("nodes", nodeCtrl)
+	return b
+}
 
-	// Create health checker
-	healthChecker := checker.NewRPCHealthChecker(checker.Config{
-		Logger:  logger,
-		Timeout: config.HealthCheckTimeout,
-	})
-
-	// Create and register health controller
-	healthConfig := controller.DefaultHealthControllerConfig()
-	healthCtrl := controller.NewHealthController(st, healthChecker, mgr, healthConfig)
-	healthCtrl.SetLogger(logger)
-	mgr.Register("health", healthCtrl)
-
-	// Create upgrade runtime
-	upgradeRuntime := upgrader.NewRuntime(st, upgrader.Config{
-		Logger: logger,
-	})
-
-	// Create and register upgrade controller
-	upgradeCtrl := controller.NewUpgradeController(st, upgradeRuntime)
-	upgradeCtrl.SetLogger(logger)
-	mgr.Register("upgrades", upgradeCtrl)
-
-	// Create and register transaction controller
-	// TxRuntime is nil for now - will be connected when network plugins are loaded
-	txCtrl := controller.NewTxController(st, nil)
-	txCtrl.SetLogger(logger)
-	mgr.Register("transactions", txCtrl)
-
-	// Create gRPC server with optional auth interceptors for remote mode
-	var grpcServer *grpc.Server
-	if config.Listen != "" && config.AuthEnabled {
-		// Load API key store for authentication.
-		// NOTE: Keys are loaded once at startup. After creating or revoking keys
-		// with `devnetd keys create/revoke`, the server must be restarted for
-		// changes to take effect. Consider implementing hot-reload in the future.
-		keysFile := config.AuthKeysFile
-		if keysFile == "" {
-			keysFile = filepath.Join(config.DataDir, "api-keys.yaml")
-		}
-		keyStore := auth.NewFileKeyStore(keysFile)
-		if err := keyStore.Load(); err != nil {
-			logger.Warn("failed to load API keys, starting with empty key store", "error", err)
-		}
-
-		// Create gRPC server with auth interceptors
-		grpcServer = grpc.NewServer(
-			grpc.ChainUnaryInterceptor(auth.NewAuthInterceptor(keyStore, IsLocalConnection)),
-			grpc.ChainStreamInterceptor(auth.NewStreamAuthInterceptor(keyStore, IsLocalConnection)),
-		)
-		logger.Info("authentication enabled for remote connections")
-	} else {
-		grpcServer = grpc.NewServer()
+// WithGRPCServices initializes gRPC server and registers services.
+func (b *ServerBuilder) WithGRPCServices() *ServerBuilder {
+	if b.err != nil {
+		return b
 	}
 
-	// Create network service first (needed by ante handler)
-	githubFactory := NewDefaultGitHubClientFactory(config.DataDir, logger)
+	grpcServer := b.buildGRPCServer()
+	b.server.grpcServer = grpcServer
+
+	networkSvc := b.newNetworkService()
+	anteHandler := ante.New(b.server.store, networkSvc)
+	shutdownCtx := b.initShutdownContext()
+	b.registerGRPCServices(grpcServer, networkSvc, anteHandler, shutdownCtx)
+	return b
+}
+
+func (b *ServerBuilder) buildGRPCServer() *grpc.Server {
+	if b.config.Listen == "" || !b.config.AuthEnabled {
+		return grpc.NewServer()
+	}
+
+	keysFile := b.config.AuthKeysFile
+	if keysFile == "" {
+		keysFile = filepath.Join(b.config.DataDir, "api-keys.yaml")
+	}
+	keyStore := auth.NewFileKeyStore(keysFile)
+	if err := keyStore.Load(); err != nil {
+		b.server.logger.Warn("failed to load API keys, starting with empty key store", "error", err)
+	}
+
+	b.server.logger.Info("authentication enabled for remote connections")
+	return grpc.NewServer(
+		grpc.ChainUnaryInterceptor(auth.NewAuthInterceptor(keyStore, IsLocalConnection)),
+		grpc.ChainStreamInterceptor(auth.NewStreamAuthInterceptor(keyStore, IsLocalConnection)),
+	)
+}
+
+func (b *ServerBuilder) newNetworkService() *NetworkService {
+	githubFactory := NewDefaultGitHubClientFactory(b.config.DataDir, b.server.logger)
 	networkSvc := NewNetworkService(githubFactory)
-	networkSvc.SetLogger(logger)
+	networkSvc.SetLogger(b.server.logger)
+	return networkSvc
+}
 
-	// Create ante handler for request validation
-	anteHandler := ante.New(st, networkSvc)
-
-	// Create shutdown context for terminating long-running streaming RPCs during shutdown.
-	// This context is cancelled before GracefulStop() to unblock streams that would
-	// otherwise prevent graceful shutdown (e.g., log streaming blocked waiting for input).
+func (b *ServerBuilder) initShutdownContext() context.Context {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	b.server.shutdownCtx = shutdownCtx
+	b.server.shutdownCancel = shutdownCancel
+	b.pushCleanup(func() error {
+		shutdownCancel()
+		return nil
+	})
+	return shutdownCtx
+}
 
-	// Register services
-	devnetSvc := NewDevnetServiceWithAnte(st, mgr, anteHandler, subnetAlloc, devnetProv)
-	devnetSvc.SetLogger(logger)
+func (b *ServerBuilder) registerGRPCServices(
+	grpcServer *grpc.Server,
+	networkSvc *NetworkService,
+	anteHandler *ante.AnteHandler,
+	shutdownCtx context.Context,
+) {
+	devnetSvc := NewDevnetServiceWithAnte(b.server.store, b.server.manager, anteHandler, b.server.subnetAllocator, b.devnetProv)
+	devnetSvc.SetLogger(b.server.logger)
 	v1.RegisterDevnetServiceServer(grpcServer, devnetSvc)
 
-	nodeSvc := NewNodeServiceWithAnte(st, mgr, nodeRuntime, anteHandler, shutdownCtx)
-	nodeSvc.SetLogger(logger)
+	nodeSvc := NewNodeServiceWithAnte(b.server.store, b.server.manager, b.server.nodeRuntime, anteHandler, shutdownCtx)
+	nodeSvc.SetLogger(b.server.logger)
 	v1.RegisterNodeServiceServer(grpcServer, nodeSvc)
 
-	upgradeSvc := NewUpgradeServiceWithAnte(st, mgr, anteHandler)
-	upgradeSvc.SetLogger(logger)
+	upgradeSvc := NewUpgradeServiceWithAnte(b.server.store, b.server.manager, anteHandler)
+	upgradeSvc.SetLogger(b.server.logger)
 	v1.RegisterUpgradeServiceServer(grpcServer, upgradeSvc)
 
-	txSvc := NewTransactionService(st, mgr)
-	txSvc.SetLogger(logger)
+	txSvc := NewTransactionService(b.server.store, b.server.manager)
+	txSvc.SetLogger(b.server.logger)
 	v1.RegisterTransactionServiceServer(grpcServer, txSvc)
 
 	v1.RegisterNetworkServiceServer(grpcServer, networkSvc)
+	v1.RegisterAuthServiceServer(grpcServer, NewAuthService())
+}
 
-	// Register auth service for ping/whoami
-	authSvc := NewAuthService()
-	v1.RegisterAuthServiceServer(grpcServer, authSvc)
+// Build finalizes server construction.
+func (b *ServerBuilder) Build() (*Server, error) {
+	if b.err != nil {
+		return nil, b.cleanupOnError(b.err)
+	}
+	b.cleanupStack = nil
+	return b.server, nil
+}
 
-	return &Server{
-		config:          config,
-		store:           st,
-		manager:         mgr,
-		healthCtrl:      healthCtrl,
-		pluginManager:   pluginMgr,
-		subnetAllocator: subnetAlloc,
-		nodeRuntime:     nodeRuntime,
-		grpcServer:      grpcServer,
-		logger:          logger,
-		logFile:         logFile,
-		shutdownCtx:     shutdownCtx,
-		shutdownCancel:  shutdownCancel,
-	}, nil
+func (b *ServerBuilder) pushCleanup(fn func() error) {
+	b.cleanupStack = append(b.cleanupStack, fn)
+}
+
+func (b *ServerBuilder) cleanupOnError(buildErr error) error {
+	var cleanupErr error
+	for i := len(b.cleanupStack) - 1; i >= 0; i-- {
+		cleanupErr = multierr.Append(cleanupErr, b.cleanupStack[i]())
+	}
+	b.cleanupStack = nil
+	return multierr.Append(buildErr, cleanupErr)
 }
 
 // Run starts the server and blocks until shutdown.
