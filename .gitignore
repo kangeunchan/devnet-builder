@@ -1,6 +1,7 @@
 /build/
 .idea/
 .vscode/
+.tool-versions
 
 # Allow source code directories named 'build'
 !internal/**/build/
@@ -36,6 +37,7 @@ docker/devnet/
 *.tmp
 *.swp
 *~
+.cache/
 
 # E2E test artifacts (auto-generated)
 tests/e2e/results/
