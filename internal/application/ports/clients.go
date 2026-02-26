@@ -378,7 +378,19 @@ type StateExportOptions struct {
 	HomeDir string
 
 	// BinaryPath is the path to the chain binary for running export
+	// Optional when DockerImage is provided.
 	BinaryPath string
+
+	// DockerImage is the container image used for export when BinaryPath is empty.
+	DockerImage string
+
+	// BinaryName is the container entrypoint binary name (e.g., "gaiad").
+	// If empty, the exporter may infer it from DockerImage.
+	BinaryName string
+
+	// DockerHomeDir is the chain home directory inside the container.
+	// If empty, implementation defaults are used.
+	DockerHomeDir string
 
 	// RpcGenesis is the genesis fetched from RPC (for chain params)
 	RpcGenesis []byte

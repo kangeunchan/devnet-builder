@@ -172,11 +172,18 @@ message ValidatorInfo {
     string self_delegation = 4;
 }
 
+message AccountInfo {
+    string name = 1;
+    string address = 2;
+    string balance = 3;
+}
+
 message ModifyGenesisRequest {
     bytes genesis = 1;
     string chain_id = 2;
     int32 num_validators = 3;
     repeated ValidatorInfo validators = 4;
+    repeated AccountInfo add_accounts = 5;
 }
 
 message GenerateDevnetRequest {
@@ -214,6 +221,7 @@ message ModifyGenesisFileRequest {
     string chain_id = 3;
     int32 num_validators = 4;
     repeated ValidatorInfo validators = 5;
+    repeated AccountInfo add_accounts = 6;
 }
 
 message ModifyGenesisFileResponse {
