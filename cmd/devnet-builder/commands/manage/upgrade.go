@@ -3,6 +3,7 @@ package manage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -178,20 +179,98 @@ type UpgradeResultJSON struct {
 	PostGenesisPath   string `json:"post_genesis_path,omitempty"`
 }
 
-func runUpgrade(cmd *cobra.Command, args []string) error {
-	// Get config from context
-	cmdCtx := cmd.Context()
-	cfg := ctxconfig.FromContext(cmdCtx)
-	homeDir := cfg.HomeDir()
-	jsonMode := cfg.JSONMode()
+type upgradeContext struct {
+	cmd        *cobra.Command
+	commandCtx context.Context
+	ctx        context.Context
+	homeDir    string
+	jsonMode   bool
+	logger     *output.Logger
+}
 
-	// Set up signal handling for graceful cancellation
-	ctx, cancel := context.WithCancel(cmdCtx)
-	defer cancel()
+type upgradeResolvedConfig struct {
+	svc               *application.DevnetService
+	metadata          *ports.DevnetMetadata
+	networkModule     network.NetworkModule
+	resolvedMode      UpgradeExecutionMode
+	modeExplicitlySet bool
+}
+
+type upgradeBinaryResolution struct {
+	selectedVersion         string
+	selectedName            string
+	customBinarySymlinkPath string
+	cachedBuildResult       *dto.BuildOutput
+	versionResolvedImage    string
+	targetBinary            string
+	targetImage             string
+}
+
+type upgradeGovernanceResolution struct {
+	govParams    *ports.GovParams
+	votingPeriod time.Duration
+}
+
+type upgradeExecutionResult struct {
+	result *dto.ExecuteUpgradeOutput
+}
+
+var errUpgradeCancelled = errors.New("upgrade cancelled")
+
+func runUpgrade(cmd *cobra.Command, args []string) error {
+	upgradeCtx := newUpgradeContext(cmd)
+	var cleanup func()
+	upgradeCtx.ctx, cleanup = setupSignalHandling(upgradeCtx.commandCtx)
+	defer cleanup()
+
+	if upgradeClearState || upgradeShowStatus {
+		return handleResumeOnlyOperations(upgradeCtx.ctx, upgradeCtx.homeDir, upgradeCtx.logger, upgradeCtx.jsonMode)
+	}
+
+	resolvedConfig, err := resolveUpgradeConfig(upgradeCtx)
+	if err != nil {
+		return err
+	}
+
+	binaryResolution, err := resolveBinarySource(upgradeCtx, resolvedConfig)
+	if errors.Is(err, errUpgradeCancelled) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	governanceResolution, err := resolveGovernanceParams(upgradeCtx, resolvedConfig)
+	if err != nil {
+		return err
+	}
+
+	executionResult, err := executeUpgrade(upgradeCtx, resolvedConfig, binaryResolution, governanceResolution)
+	if err != nil {
+		return err
+	}
+
+	return reportResults(upgradeCtx, executionResult)
+}
+
+func newUpgradeContext(cmd *cobra.Command) *upgradeContext {
+	commandCtx := cmd.Context()
+	cfg := ctxconfig.FromContext(commandCtx)
+
+	return &upgradeContext{
+		cmd:        cmd,
+		commandCtx: commandCtx,
+		homeDir:    cfg.HomeDir(),
+		jsonMode:   cfg.JSONMode(),
+		logger:     output.DefaultLogger,
+	}
+}
+
+func setupSignalHandling(commandCtx context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(commandCtx)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigChan)
 
 	go func() {
 		<-sigChan
@@ -208,141 +287,181 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	logger := output.DefaultLogger
-
-	// Handle resume-related flags early (before devnet checks for some operations)
-	if upgradeClearState || upgradeShowStatus {
-		return handleResumeOnlyOperations(ctx, homeDir, logger, jsonMode)
+	cleanup := func() {
+		signal.Stop(sigChan)
+		cancel()
 	}
 
-	// Initialize DevnetService for existence and status checks
-	svc, err := application.GetService(homeDir)
+	return ctx, cleanup
+}
+
+func resolveUpgradeConfig(upgradeCtx *upgradeContext) (*upgradeResolvedConfig, error) {
+	svc, err := application.GetService(upgradeCtx.homeDir)
 	if err != nil {
-		return outputUpgradeError(fmt.Errorf("failed to initialize service: %w", err))
+		return nil, outputUpgradeError(fmt.Errorf("failed to initialize service: %w", err))
 	}
 
-	// Check if devnet exists using DevnetService
 	if !svc.DevnetExists() {
-		err := fmt.Errorf("no devnet found at %s", homeDir)
-		if jsonMode {
-			return outputUpgradeError(err)
+		err := fmt.Errorf("no devnet found at %s", upgradeCtx.homeDir)
+		if upgradeCtx.jsonMode {
+			return nil, outputUpgradeError(err)
 		}
-		return err
+		return nil, err
 	}
 
-	// Load metadata via DevnetService for status check
-	cleanMetadata, err := svc.LoadMetadata(ctx)
+	metadata, err := svc.LoadMetadata(upgradeCtx.ctx)
 	if err != nil {
-		if jsonMode {
-			return outputUpgradeError(err)
+		if upgradeCtx.jsonMode {
+			return nil, outputUpgradeError(err)
 		}
-		return err
+		return nil, err
 	}
 
-	if cleanMetadata.Status != ports.StateRunning {
-		if jsonMode {
-			return outputUpgradeError(fmt.Errorf("devnet is not running"))
+	if metadata.Status != ports.StateRunning {
+		if upgradeCtx.jsonMode {
+			return nil, outputUpgradeError(fmt.Errorf("devnet is not running"))
 		}
-		return fmt.Errorf("devnet is not running\nStart it with 'devnet-builder start'")
+		return nil, fmt.Errorf("devnet is not running\nStart it with 'devnet-builder start'")
 	}
 
-	// Get network module for binary name
-	networkModule, err := network.Get(cleanMetadata.BlockchainNetwork)
+	networkModule, err := network.Get(metadata.BlockchainNetwork)
 	if err != nil {
-		return outputUpgradeError(fmt.Errorf("failed to get network module: %w", err))
+		return nil, outputUpgradeError(fmt.Errorf("failed to get network module: %w", err))
 	}
 
-	// Resolve execution mode: flag > metadata default
-	resolvedMode := UpgradeExecutionMode(cleanMetadata.ExecutionMode)
+	resolvedMode, modeExplicitlySet, err := resolveUpgradeExecutionMode(metadata.ExecutionMode)
+	if err != nil {
+		return nil, err
+	}
+
+	if !upgradeCtx.jsonMode {
+		warnUpgradeModeMismatch(resolvedMode, modeExplicitlySet, metadata.ExecutionMode)
+	}
+
+	return &upgradeResolvedConfig{
+		svc:               svc,
+		metadata:          metadata,
+		networkModule:     networkModule,
+		resolvedMode:      resolvedMode,
+		modeExplicitlySet: modeExplicitlySet,
+	}, nil
+}
+
+func resolveUpgradeExecutionMode(metadataMode types.ExecutionMode) (UpgradeExecutionMode, bool, error) {
+	resolvedMode := UpgradeExecutionMode(metadataMode)
 	modeExplicitlySet := false
+
 	if upgradeMode != "" {
 		switch UpgradeExecutionMode(upgradeMode) {
 		case UpgradeModeDocker, UpgradeModeLocal:
 			resolvedMode = UpgradeExecutionMode(upgradeMode)
 			modeExplicitlySet = true
 		default:
-			return fmt.Errorf("invalid mode %q: must be 'docker' or 'local'", upgradeMode)
+			return "", false, fmt.Errorf("invalid mode %q: must be 'docker' or 'local'", upgradeMode)
 		}
 	}
 
-	// Mode validation against --image/--binary flags
-	if !jsonMode {
-		if resolvedMode == UpgradeModeDocker && upgradeBinary != "" && !modeExplicitlySet {
-			output.Warn("Devnet was started in docker mode but --binary was provided.")
-			output.Warn("Use --image for docker mode, or --mode local to switch modes.")
-		}
-		if resolvedMode == UpgradeModeLocal && upgradeImage != "" && !modeExplicitlySet {
-			output.Warn("Devnet was started in local mode but --image was provided.")
-			output.Warn("Use --binary for local mode, or --mode docker to switch modes.")
-		}
-		if modeExplicitlySet && resolvedMode != UpgradeExecutionMode(cleanMetadata.ExecutionMode) {
-			output.Warn("Switching execution mode from %s to %s.", cleanMetadata.ExecutionMode, resolvedMode)
-			output.Warn("The devnet will continue in %s mode after this upgrade.", resolvedMode)
-		}
+	return resolvedMode, modeExplicitlySet, nil
+}
+
+func warnUpgradeModeMismatch(resolvedMode UpgradeExecutionMode, modeExplicitlySet bool, metadataMode types.ExecutionMode) {
+	if resolvedMode == UpgradeModeDocker && upgradeBinary != "" && !modeExplicitlySet {
+		output.Warn("Devnet was started in docker mode but --binary was provided.")
+		output.Warn("Use --image for docker mode, or --mode local to switch modes.")
 	}
+	if resolvedMode == UpgradeModeLocal && upgradeImage != "" && !modeExplicitlySet {
+		output.Warn("Devnet was started in local mode but --image was provided.")
+		output.Warn("Use --binary for local mode, or --mode docker to switch modes.")
+	}
+	if modeExplicitlySet && resolvedMode != UpgradeExecutionMode(metadataMode) {
+		output.Warn("Switching execution mode from %s to %s.", metadataMode, resolvedMode)
+		output.Warn("The devnet will continue in %s mode after this upgrade.", resolvedMode)
+	}
+}
 
-	// Track selected version and name
-	var selectedVersion string
-	var selectedName string
+func resolveBinarySource(upgradeCtx *upgradeContext, resolvedConfig *upgradeResolvedConfig) (*upgradeBinaryResolution, error) {
+	selectedName := upgradeName
+	selectedVersion := upgradeVersion
+	customBinarySymlinkPath := ""
 
-	// Variable to store custom binary path (set by unified selection or selectBinaryForUpgrade)
-	var customBinarySymlinkPath string
-
-	// Interactive mode: run selection flow if not disabled
-	// Skip interactive selection if --image or --binary flags are provided
-	if !upgradeNoInteractive && !jsonMode && upgradeImage == "" && upgradeBinary == "" {
-		// Use unified selection function for upgrade command
-		// forUpgrade = true: collects only upgrade target version (no export/start distinction)
-		// includeNetworkSelection = false: network is already determined from running devnet
-		// skipUpgradeName = skipGovernance: skip upgrade name prompt when --skip-gov is set
-		// Pass cleanMetadata.BlockchainNetwork to fetch releases from the correct repository
-		selection, err := RunInteractiveVersionSelectionWithMode(ctx, cmd, false, true, "", skipGovernance, cleanMetadata.BlockchainNetwork)
+	if shouldRunUpgradeInteractiveSelection(upgradeCtx.jsonMode) {
+		selection, err := RunInteractiveVersionSelectionWithMode(
+			upgradeCtx.ctx,
+			upgradeCtx.cmd,
+			false,
+			true,
+			"",
+			skipGovernance,
+			resolvedConfig.metadata.BlockchainNetwork,
+		)
 		if err != nil {
 			if interactive.IsCancellation(err) {
 				fmt.Println("Operation cancelled.")
-				return nil
+				return nil, errUpgradeCancelled
 			}
-			return err
+			return nil, err
 		}
 
-		// Extract version information
-		// For upgrade, we use the start version (same as export version in unified selection)
 		selectedVersion = selection.StartVersion
-
-		// Determine upgrade name with priority:
-		// 1. CLI flag (--name) if provided
-		// 2. User input from interactive prompt (selection.UpgradeName)
-		// 3. Auto-generate from version as fallback
-		if upgradeName != "" {
-			selectedName = upgradeName
-		} else if selection.UpgradeName != "" {
-			// Use the upgrade name entered by user in interactive prompt
-			selectedName = selection.UpgradeName
-		} else {
-			// Auto-generate upgrade name from version
-			// For custom refs (branches), extract just the last part after '/'
-			// e.g., "feat/gas-waiver" -> "gas-waiver-upgrade"
-			// For tags, use as-is: "v2.0.0" -> "v2.0.0-upgrade"
-			versionForName := selection.StartVersion
-			if selection.StartIsCustomRef && strings.Contains(versionForName, "/") {
-				parts := strings.Split(versionForName, "/")
-				versionForName = parts[len(parts)-1]
-			}
-			selectedName = versionForName + "-upgrade"
-		}
-
-		// If user selected a local binary, store it for later use
-		// This prevents the need to call selectBinaryForUpgrade() again
+		selectedName = resolveUpgradeName(selection)
 		if selection.BinarySource.IsLocal() && selection.BinarySource.SelectedPath != "" {
 			customBinarySymlinkPath = selection.BinarySource.SelectedPath
 		}
-	} else {
-		// Non-interactive mode: use explicit flags
-		selectedName = upgradeName
-		selectedVersion = upgradeVersion
 	}
 
-	// Check for deprecated --binary flag usage
+	if err := validateUpgradeSourceInputs(selectedVersion, selectedName); err != nil {
+		return nil, err
+	}
+
+	cachedBuildResult, versionResolvedImage, err := resolveUpgradeBuildTarget(upgradeCtx, resolvedConfig, selectedVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	customBinarySymlinkPath, err = resolveUpgradeLocalBinaryPath(
+		upgradeCtx,
+		resolvedConfig,
+		cachedBuildResult,
+		customBinarySymlinkPath,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	targetBinary, targetImage := buildUpgradeTargets(customBinarySymlinkPath, versionResolvedImage)
+
+	return &upgradeBinaryResolution{
+		selectedVersion:         selectedVersion,
+		selectedName:            selectedName,
+		customBinarySymlinkPath: customBinarySymlinkPath,
+		cachedBuildResult:       cachedBuildResult,
+		versionResolvedImage:    versionResolvedImage,
+		targetBinary:            targetBinary,
+		targetImage:             targetImage,
+	}, nil
+}
+
+func shouldRunUpgradeInteractiveSelection(jsonMode bool) bool {
+	return !upgradeNoInteractive && !jsonMode && upgradeImage == "" && upgradeBinary == ""
+}
+
+func resolveUpgradeName(selection *interactive.SelectionConfig) string {
+	if upgradeName != "" {
+		return upgradeName
+	}
+	if selection.UpgradeName != "" {
+		return selection.UpgradeName
+	}
+
+	versionForName := selection.StartVersion
+	if selection.StartIsCustomRef && strings.Contains(versionForName, "/") {
+		parts := strings.Split(versionForName, "/")
+		versionForName = parts[len(parts)-1]
+	}
+	return versionForName + "-upgrade"
+}
+
+func validateUpgradeSourceInputs(selectedVersion, selectedName string) error {
 	if upgradeBinary != "" {
 		return fmt.Errorf(`the --binary flag has been removed in favor of interactive binary selection
 
@@ -366,195 +485,242 @@ Migration guide:
 For more information, see: https://github.com/altuslabsxyz/devnet-builder/blob/main/docs/MIGRATION.md`)
 	}
 
-	// Validate that we have either image or version to build (binary flag removed)
 	if upgradeImage == "" && selectedVersion == "" {
 		return fmt.Errorf("either --image or --version must be provided (or use interactive mode)")
 	}
 
-	// Validate that name is provided (not required for --skip-gov mode)
 	if selectedName == "" && !skipGovernance {
 		return fmt.Errorf("upgrade name is required (--name or interactive mode)")
 	}
 
-	// Mode-aware version resolution
-	var cachedBuildResult *dto.BuildOutput
-	var versionResolvedImage string
+	return nil
+}
 
-	if selectedVersion != "" && upgradeImage == "" && upgradeBinary == "" {
-		if resolvedMode == UpgradeModeDocker && isStandardVersionTag(selectedVersion) {
-			// Docker mode with standard version tag: resolve to docker image
-			dockerImage := networkModule.DockerImage()
-			versionResolvedImage = fmt.Sprintf("%s:%s", dockerImage, selectedVersion)
-			logger.Info("Using docker image for version %s: %s", selectedVersion, versionResolvedImage)
-		} else {
-			// Local mode or custom ref: build local binary to cache using DI container
-			buildResult, err := buildBinaryForUpgrade(ctx, cleanMetadata.BlockchainNetwork, selectedVersion, cleanMetadata.NetworkName, homeDir, logger)
-			if err != nil {
-				return fmt.Errorf("failed to pre-build binary: %w", err)
-			}
-			cachedBuildResult = buildResult
-			commitShort := buildResult.CommitHash
-			if len(commitShort) > 12 {
-				commitShort = commitShort[:12]
-			}
-			logger.Success("Binary pre-built and cached (commit: %s)", commitShort)
-		}
+func resolveUpgradeBuildTarget(
+	upgradeCtx *upgradeContext,
+	resolvedConfig *upgradeResolvedConfig,
+	selectedVersion string,
+) (*dto.BuildOutput, string, error) {
+	if selectedVersion == "" || upgradeImage != "" || upgradeBinary != "" {
+		return nil, "", nil
 	}
 
-	// Get governance parameters (skip if --skip-gov is set)
-	var govParams *ports.GovParams
-	var vp time.Duration
+	if resolvedConfig.resolvedMode == UpgradeModeDocker && isStandardVersionTag(selectedVersion) {
+		dockerImage := resolvedConfig.networkModule.DockerImage()
+		versionResolvedImage := fmt.Sprintf("%s:%s", dockerImage, selectedVersion)
+		upgradeCtx.logger.Info("Using docker image for version %s: %s", selectedVersion, versionResolvedImage)
+		return nil, versionResolvedImage, nil
+	}
 
-	if skipGovernance {
-		// Skip governance mode - show warning
-		if !jsonMode {
-			logger.Warn("Skipping governance proposal (--skip-gov mode)")
-			logger.Warn("This will directly replace the binary WITHOUT governance upgrade.")
-			logger.Warn("Chain state must be compatible with the new version.")
-			fmt.Println()
-		}
-	} else if forceVotingPeriod {
-		// User explicitly wants to override with CLI value
-		logger.Info("Using forced voting period from --voting-period flag...")
-		parsedVP, parseErr := time.ParseDuration(votingPeriod)
-		if parseErr != nil {
-			return fmt.Errorf("invalid voting period: %w", parseErr)
-		}
-		vp = parsedVP
-		logger.Info("Forced expedited voting period: %s", vp)
-	} else {
-		// Query from chain (plugin or REST)
-		logger.Info("Fetching governance parameters from chain...")
-		rpcHost := "localhost"
-		rpcPort := 26657
-		tempFactory := di.NewInfrastructureFactory(homeDir, logger).
-			WithNetworkModule(networkModule)
-		rpcClient := tempFactory.CreateRPCClient(rpcHost, rpcPort)
+	buildResult, err := buildBinaryForUpgrade(
+		upgradeCtx.ctx,
+		resolvedConfig.metadata.BlockchainNetwork,
+		selectedVersion,
+		resolvedConfig.metadata.NetworkName,
+		upgradeCtx.homeDir,
+		upgradeCtx.logger,
+	)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to pre-build binary: %w", err)
+	}
 
-		// Configure plugin delegation for governance parameter queries
-		// Type assert to check if network module supports governance parameter queries
-		if cosmosClient, ok := rpcClient.(*infrarpc.CosmosRPCClient); ok {
-			// Check if network module implements GetGovernanceParams (optional interface)
-			if pluginModule, ok := networkModule.(infrarpc.NetworkPluginModule); ok {
-				rpcClient = cosmosClient.WithPlugin(pluginModule, cleanMetadata.NetworkName)
-			}
-			// If plugin doesn't implement GetGovernanceParams, will fall back to REST API
-		}
+	commitShort := buildResult.CommitHash
+	if len(commitShort) > 12 {
+		commitShort = commitShort[:12]
+	}
+	upgradeCtx.logger.Success("Binary pre-built and cached (commit: %s)", commitShort)
 
-		var err error
-		govParams, err = rpcClient.GetGovParams(ctx)
+	return buildResult, "", nil
+}
+
+func resolveUpgradeLocalBinaryPath(
+	upgradeCtx *upgradeContext,
+	resolvedConfig *upgradeResolvedConfig,
+	cachedBuildResult *dto.BuildOutput,
+	customBinarySymlinkPath string,
+) (string, error) {
+	if resolvedConfig.resolvedMode != UpgradeModeLocal {
+		return customBinarySymlinkPath, nil
+	}
+
+	if cachedBuildResult != nil {
+		upgradeCtx.logger.Debug("Using pre-built binary from custom ref: %s", cachedBuildResult.BinaryPath)
+		return customBinarySymlinkPath, nil
+	}
+
+	if customBinarySymlinkPath == "" {
+		selectedPath, err := selectBinaryForUpgrade(
+			upgradeCtx.ctx,
+			resolvedConfig.metadata.NetworkName,
+			resolvedConfig.metadata.BlockchainNetwork,
+			upgradeCtx.homeDir,
+			upgradeCtx.logger,
+		)
 		if err != nil {
-			logger.Debug("Failed to fetch gov params, using CLI flag value: %v", err)
-			// Fallback to CLI flag if chain query fails
-			parsedVP, parseErr := time.ParseDuration(votingPeriod)
-			if parseErr != nil {
-				return fmt.Errorf("invalid voting period: %w", parseErr)
-			}
-			govParams = &ports.GovParams{
-				ExpeditedVotingPeriod: parsedVP,
-			}
+			return "", err
 		}
 
-		// Use expedited voting period from chain
-		vp = govParams.ExpeditedVotingPeriod
-		logger.Info("Using expedited voting period: %s", vp)
-	}
-
-	// Binary resolution for local mode upgrades (--binary flag removed)
-	// Priority: pre-built binary (cachedBuildResult) > unified selection > cached binary selection > error
-	if resolvedMode == UpgradeModeLocal {
-		// Check if binary was already built from custom ref
-		// If cachedBuildResult is set, the binary was just pre-built - skip selection
-		if cachedBuildResult != nil {
-			// Binary was pre-built from custom ref (e.g., feat/gas-waiver) - use it directly
-			logger.Debug("Using pre-built binary from custom ref: %s", cachedBuildResult.BinaryPath)
-		} else if customBinarySymlinkPath == "" {
-			// No binary selected yet - fall back to cache selection (for non-interactive mode or GitHub release flow)
-			// Priority 2: Interactive/Auto selection from cache (US1)
-			// This is only for local mode; docker mode uses images
-			selectedPath, err := selectBinaryForUpgrade(ctx, cleanMetadata.NetworkName, cleanMetadata.BlockchainNetwork, homeDir, logger)
-			if err != nil {
-				// Error contains detailed validation failure info
-				return err
-			}
-
-			if selectedPath == "" {
-				// No cached binaries available at all
-				cacheDir := paths.BinaryCachePath(homeDir)
-				return fmt.Errorf("no cached binaries found for upgrade\nCache directory: %s\nUse --binary flag to specify a binary, or deploy/build a binary first", cacheDir)
-			}
-
-			customBinarySymlinkPath = selectedPath
-		} else {
-			// customBinarySymlinkPath already set from unified selection - use it directly
-			logger.Success("Using selected binary: %s", customBinarySymlinkPath)
+		if selectedPath == "" {
+			cacheDir := paths.BinaryCachePath(upgradeCtx.homeDir)
+			return "", fmt.Errorf("no cached binaries found for upgrade\nCache directory: %s\nUse --binary flag to specify a binary, or deploy/build a binary first", cacheDir)
 		}
+
+		return selectedPath, nil
 	}
 
-	// Determine target binary/image
-	targetBinary := customBinarySymlinkPath // Use selected/imported binary if available
+	upgradeCtx.logger.Success("Using selected binary: %s", customBinarySymlinkPath)
+	return customBinarySymlinkPath, nil
+}
+
+func buildUpgradeTargets(customBinarySymlinkPath, versionResolvedImage string) (string, string) {
+	targetBinary := customBinarySymlinkPath
 	if targetBinary == "" && upgradeBinary != "" {
-		targetBinary = upgradeBinary // Fallback to raw path (should not happen with import)
+		targetBinary = upgradeBinary
 	}
 	targetImage := upgradeImage
 	if versionResolvedImage != "" {
 		targetImage = versionResolvedImage
 	}
+	return targetBinary, targetImage
+}
 
-	// Print upgrade plan (non-JSON mode)
-	if !jsonMode {
-		if skipGovernance {
-			printSkipGovPlan(string(resolvedMode), targetImage, targetBinary, cachedBuildResult, cleanMetadata)
-		} else {
-			printUpgradePlan(selectedName, string(resolvedMode), targetImage, targetBinary, cachedBuildResult, vp, cleanMetadata)
+func resolveGovernanceParams(
+	upgradeCtx *upgradeContext,
+	resolvedConfig *upgradeResolvedConfig,
+) (*upgradeGovernanceResolution, error) {
+	var govParams *ports.GovParams
+	var votingPeriodDuration time.Duration
+
+	if skipGovernance {
+		if !upgradeCtx.jsonMode {
+			upgradeCtx.logger.Warn("Skipping governance proposal (--skip-gov mode)")
+			upgradeCtx.logger.Warn("This will directly replace the binary WITHOUT governance upgrade.")
+			upgradeCtx.logger.Warn("Chain state must be compatible with the new version.")
+			fmt.Println()
+		}
+		return &upgradeGovernanceResolution{
+			govParams:    nil,
+			votingPeriod: 0,
+		}, nil
+	}
+
+	if forceVotingPeriod {
+		upgradeCtx.logger.Info("Using forced voting period from --voting-period flag...")
+		parsedVotingPeriod, err := time.ParseDuration(votingPeriod)
+		if err != nil {
+			return nil, fmt.Errorf("invalid voting period: %w", err)
+		}
+		upgradeCtx.logger.Info("Forced expedited voting period: %s", parsedVotingPeriod)
+		return &upgradeGovernanceResolution{
+			govParams:    nil,
+			votingPeriod: parsedVotingPeriod,
+		}, nil
+	}
+
+	upgradeCtx.logger.Info("Fetching governance parameters from chain...")
+	rpcHost := "localhost"
+	rpcPort := 26657
+
+	tempFactory := di.NewInfrastructureFactory(upgradeCtx.homeDir, upgradeCtx.logger).
+		WithNetworkModule(resolvedConfig.networkModule)
+	rpcClient := tempFactory.CreateRPCClient(rpcHost, rpcPort)
+
+	if cosmosClient, ok := rpcClient.(*infrarpc.CosmosRPCClient); ok {
+		if pluginModule, ok := resolvedConfig.networkModule.(infrarpc.NetworkPluginModule); ok {
+			rpcClient = cosmosClient.WithPlugin(pluginModule, resolvedConfig.metadata.NetworkName)
 		}
 	}
 
-	// Create DI container for upgrade
-	factory := di.NewInfrastructureFactory(homeDir, logger).
-		WithNetworkModule(networkModule).
-		WithDockerMode(resolvedMode == UpgradeModeDocker)
+	var err error
+	govParams, err = rpcClient.GetGovParams(upgradeCtx.ctx)
+	if err != nil {
+		upgradeCtx.logger.Debug("Failed to fetch gov params, using CLI flag value: %v", err)
+		parsedVotingPeriod, parseErr := time.ParseDuration(votingPeriod)
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid voting period: %w", parseErr)
+		}
+		govParams = &ports.GovParams{
+			ExpeditedVotingPeriod: parsedVotingPeriod,
+		}
+	}
+
+	votingPeriodDuration = govParams.ExpeditedVotingPeriod
+	upgradeCtx.logger.Info("Using expedited voting period: %s", votingPeriodDuration)
+
+	return &upgradeGovernanceResolution{
+		govParams:    govParams,
+		votingPeriod: votingPeriodDuration,
+	}, nil
+}
+
+func executeUpgrade(
+	upgradeCtx *upgradeContext,
+	resolvedConfig *upgradeResolvedConfig,
+	binaryResolution *upgradeBinaryResolution,
+	governanceResolution *upgradeGovernanceResolution,
+) (*upgradeExecutionResult, error) {
+	if !upgradeCtx.jsonMode {
+		if skipGovernance {
+			printSkipGovPlan(
+				string(resolvedConfig.resolvedMode),
+				binaryResolution.targetImage,
+				binaryResolution.targetBinary,
+				binaryResolution.cachedBuildResult,
+				resolvedConfig.metadata,
+			)
+		} else {
+			printUpgradePlan(
+				binaryResolution.selectedName,
+				string(resolvedConfig.resolvedMode),
+				binaryResolution.targetImage,
+				binaryResolution.targetBinary,
+				binaryResolution.cachedBuildResult,
+				governanceResolution.votingPeriod,
+				resolvedConfig.metadata,
+			)
+		}
+	}
+
+	factory := di.NewInfrastructureFactory(upgradeCtx.homeDir, upgradeCtx.logger).
+		WithNetworkModule(resolvedConfig.networkModule).
+		WithDockerMode(resolvedConfig.resolvedMode == UpgradeModeDocker)
 
 	container, err := factory.WireContainer()
 	if err != nil {
-		return outputUpgradeError(fmt.Errorf("failed to initialize: %w", err))
+		return nil, outputUpgradeError(fmt.Errorf("failed to initialize: %w", err))
 	}
 
-	// Check for existing upgrade state (handles --resume and --force-restart)
-	resumeState, err := checkForExistingUpgradeState(ctx, homeDir, logger, jsonMode)
+	resumeState, err := checkForExistingUpgradeState(upgradeCtx.ctx, upgradeCtx.homeDir, upgradeCtx.logger, upgradeCtx.jsonMode)
 	if err != nil {
-		if jsonMode {
-			return outputUpgradeError(err)
+		if upgradeCtx.jsonMode {
+			return nil, outputUpgradeError(err)
 		}
-		return err
+		return nil, err
 	}
 
-	// Build ExecuteUpgradeInput
 	input := dto.ExecuteUpgradeInput{
-		HomeDir:        homeDir,
-		UpgradeName:    selectedName,
-		TargetBinary:   targetBinary,
-		TargetImage:    targetImage,
-		TargetVersion:  selectedVersion,
-		VotingPeriod:   vp,
+		HomeDir:        upgradeCtx.homeDir,
+		UpgradeName:    binaryResolution.selectedName,
+		TargetBinary:   binaryResolution.targetBinary,
+		TargetImage:    binaryResolution.targetImage,
+		TargetVersion:  binaryResolution.selectedVersion,
+		VotingPeriod:   governanceResolution.votingPeriod,
 		HeightBuffer:   heightBuffer,
-		UpgradeHeight:  0, // Always auto-calculate
+		UpgradeHeight:  0,
 		WithExport:     withExport,
 		GenesisDir:     genesisDir,
-		Mode:           types.ExecutionMode(resolvedMode),
+		Mode:           types.ExecutionMode(resolvedConfig.resolvedMode),
 		SkipGovernance: skipGovernance,
 	}
 
-	// If we have a cached binary, use cache mode for atomic symlink switch
-	if cachedBuildResult != nil {
-		input.CachePath = cachedBuildResult.BinaryPath
-		input.CommitHash = cachedBuildResult.CommitHash // Deprecated, kept for compatibility
-		input.CacheRef = cachedBuildResult.CacheRef     // Use CacheRef for SetActive
-		input.TargetBinary = ""                         // Clear since we're using cache
+	if binaryResolution.cachedBuildResult != nil {
+		input.CachePath = binaryResolution.cachedBuildResult.BinaryPath
+		input.CommitHash = binaryResolution.cachedBuildResult.CommitHash
+		input.CacheRef = binaryResolution.cachedBuildResult.CacheRef
+		input.TargetBinary = ""
 	}
 
-	// Execute the upgrade using the ResumableExecuteUpgradeUseCase
-	if !jsonMode {
+	if !upgradeCtx.jsonMode {
 		if resumeState != nil {
 			fmt.Printf("[1/6] %s (resuming from %s)\n", color.CyanString("Verifying devnet status..."), resumeState.Stage)
 		} else {
@@ -562,28 +728,32 @@ For more information, see: https://github.com/altuslabsxyz/devnet-builder/blob/m
 		}
 	}
 
-	result, err := container.ResumableExecuteUpgradeUseCase().Execute(ctx, input, resumeState)
+	result, err := container.ResumableExecuteUpgradeUseCase().Execute(upgradeCtx.ctx, input, resumeState)
 	if err != nil {
-		if jsonMode {
-			return outputUpgradeError(err)
+		if upgradeCtx.jsonMode {
+			return nil, outputUpgradeError(err)
 		}
-		return err
+		return nil, err
 	}
 
-	// Update metadata with new version if upgrade was successful
 	if result.Success {
-		cleanMetadata.CurrentVersion = selectedVersion
-		cleanMetadata.ExecutionMode = types.ExecutionMode(resolvedMode)
-		if err := svc.SaveMetadata(ctx, cleanMetadata); err != nil {
-			logger.Warn("Failed to update metadata: %v", err)
+		resolvedConfig.metadata.CurrentVersion = binaryResolution.selectedVersion
+		resolvedConfig.metadata.ExecutionMode = types.ExecutionMode(resolvedConfig.resolvedMode)
+		if err := resolvedConfig.svc.SaveMetadata(upgradeCtx.ctx, resolvedConfig.metadata); err != nil {
+			upgradeCtx.logger.Warn("Failed to update metadata: %v", err)
 		}
 	}
 
-	// Output result
-	if jsonMode {
-		return outputUpgradeJSON(result)
+	return &upgradeExecutionResult{
+		result: result,
+	}, nil
+}
+
+func reportResults(upgradeCtx *upgradeContext, executionResult *upgradeExecutionResult) error {
+	if upgradeCtx.jsonMode {
+		return outputUpgradeJSON(executionResult.result)
 	}
-	return outputUpgradeText(result)
+	return outputUpgradeText(executionResult.result)
 }
 
 // selectBinaryForUpgrade orchestrates binary selection from cache for upgrade command.

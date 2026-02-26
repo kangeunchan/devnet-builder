@@ -134,6 +134,15 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Install gocyclo
+        run: go install github.com/fzipp/gocyclo/cmd/gocyclo@latest
+
+      - name: Add Go bin to PATH
+        run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Check manage command handler complexity and LOC
+        run: ./scripts/check-manage-handler-complexity.sh
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:

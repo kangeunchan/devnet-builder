@@ -147,21 +147,113 @@ Examples:
 	return cmd
 }
 
+type deployContext struct {
+	cmd      *cobra.Command
+	ctx      context.Context
+	homeDir  string
+	jsonMode bool
+	logger   *output.Logger
+	fileCfg  *config.FileConfig
+}
+
+type deployResolvedConfig struct {
+	fileCfg           *config.FileConfig
+	network           string
+	blockchainNetwork string
+	validators        int
+	mode              string
+	stableVersion     string
+	noCache           bool
+	accounts          int
+	testMnemonic      bool
+	fork              bool
+	isInteractive     bool
+}
+
+type deployPreparedInputs struct {
+	startVersion     string
+	dockerImage      string
+	customBinaryPath string
+	exportBinaryPath string
+	networkModule    network.NetworkModule
+	svc              *application.DevnetService
+}
+
+type deployExecutionResult struct {
+	runResult  *dto.RunOutput
+	devnetInfo *dto.DevnetInfo
+}
+
 func runDeploy(cmd *cobra.Command, args []string) error {
+	deployCtx := newDeployContext(cmd)
+
+	resolvedConfig, err := resolveDeployConfig(deployCtx)
+	if err != nil {
+		return err
+	}
+
+	deployCtx.logger.SetAutoSpinner(true)
+	defer deployCtx.logger.SetAutoSpinner(false)
+
+	preparedInputs, err := prepareDeployInputs(deployCtx, resolvedConfig)
+	if err != nil {
+		return err
+	}
+
+	executionResult, err := executeDeployment(deployCtx, resolvedConfig, preparedInputs)
+	if err != nil {
+		if deployCtx.jsonMode {
+			return outputDeployError(err)
+		}
+		return err
+	}
+
+	if deployCtx.jsonMode {
+		return outputDeployJSON(executionResult.runResult, executionResult.devnetInfo)
+	}
+	return outputDeployText(executionResult.runResult, executionResult.devnetInfo)
+}
+
+func newDeployContext(cmd *cobra.Command) *deployContext {
 	ctx := cmd.Context()
 	cfg := ctxconfig.FromContext(ctx)
-	homeDir := cfg.HomeDir()
-	jsonMode := cfg.JSONMode()
-	logger := output.DefaultLogger
-
-	// Build effective config from: default < config.toml < env < flag
-	// Start with loaded config.toml values
 	fileCfg := cfg.FileConfig()
 	if fileCfg == nil {
 		fileCfg = &config.FileConfig{}
 	}
 
-	// Apply flag values (flags override config.toml)
+	return &deployContext{
+		cmd:      cmd,
+		ctx:      ctx,
+		homeDir:  cfg.HomeDir(),
+		jsonMode: cfg.JSONMode(),
+		logger:   output.DefaultLogger,
+		fileCfg:  fileCfg,
+	}
+}
+
+func resolveDeployConfig(deployCtx *deployContext) (*deployResolvedConfig, error) {
+	applyDeployFlagOverrides(deployCtx.cmd, deployCtx.fileCfg)
+	applyDeployEnvOverrides(deployCtx.cmd, deployCtx.fileCfg)
+
+	setup := config.NewInteractiveSetup(deployCtx.homeDir)
+	effectiveCfg, err := setup.RunPartial(deployCtx.fileCfg)
+	if err != nil {
+		if mfErr, ok := err.(*config.MissingFieldsError); ok {
+			return nil, fmt.Errorf("missing required configuration: %v\nRun 'devnet-builder config init' to create a configuration file", mfErr.Fields)
+		}
+		return nil, err
+	}
+
+	resolvedConfig := extractDeployResolvedConfig(effectiveCfg, deployCtx.jsonMode)
+	if err := validateDeployConfiguration(resolvedConfig); err != nil {
+		return nil, err
+	}
+
+	return resolvedConfig, nil
+}
+
+func applyDeployFlagOverrides(cmd *cobra.Command, fileCfg *config.FileConfig) {
 	if cmd.Flags().Changed("network") {
 		fileCfg.Network = &deployNetwork
 	}
@@ -184,8 +276,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("accounts") {
 		fileCfg.Accounts = &deployAccounts
 	}
+}
 
-	// Apply environment variables (env overrides config.toml but not flags)
+func applyDeployEnvOverrides(cmd *cobra.Command, fileCfg *config.FileConfig) {
 	if networkEnv := os.Getenv("DEVNET_NETWORK"); networkEnv != "" && !cmd.Flags().Changed("network") {
 		fileCfg.Network = &networkEnv
 	}
@@ -196,19 +289,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if versionEnv := os.Getenv("DEVNET_NETWORK_VERSION"); versionEnv != "" && !cmd.Flags().Changed("network-version") {
 		fileCfg.NetworkVersion = &versionEnv
 	}
+}
 
-	// Run partial interactive setup for missing base config values
-	setup := config.NewInteractiveSetup(homeDir)
-	effectiveCfg, err := setup.RunPartial(fileCfg)
-	if err != nil {
-		// Check if it's a missing fields error for better messaging
-		if mfErr, ok := err.(*config.MissingFieldsError); ok {
-			return fmt.Errorf("missing required configuration: %v\nRun 'devnet-builder config init' to create a configuration file", mfErr.Fields)
-		}
-		return err
-	}
-
-	// Extract values from effective config
+func extractDeployResolvedConfig(effectiveCfg *config.FileConfig, jsonMode bool) *deployResolvedConfig {
 	deployNetwork = *effectiveCfg.Network
 	deployBlockchainNetwork = *effectiveCfg.BlockchainNetwork
 	deployValidators = *effectiveCfg.Validators
@@ -223,99 +306,168 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		deployAccounts = *effectiveCfg.Accounts
 	}
 
-	// Track version for deployment
-	// startVersion: binary for running nodes
-	// exportVersion is handled separately via --export-version flag
-	var startVersion string
-	var dockerImage string
+	return &deployResolvedConfig{
+		fileCfg:           effectiveCfg,
+		network:           deployNetwork,
+		blockchainNetwork: deployBlockchainNetwork,
+		validators:        deployValidators,
+		mode:              deployMode,
+		stableVersion:     deployStableVersion,
+		noCache:           deployNoCache,
+		accounts:          deployAccounts,
+		testMnemonic:      deployTestMnemonic,
+		fork:              deployFork,
+		isInteractive:     shouldRunDeployInteractiveSelection(jsonMode),
+	}
+}
 
-	// Determine if running in interactive mode for version selection
-	// Note: Base config interactive prompts are handled above via RunPartial
-	// Skip interactive version selection if --binary flag is provided
-	isInteractive := !deployNoInteractive && !jsonMode && deployBinary == ""
-
-	// Variable to store binary paths
-	// customBinaryPath: binary for running nodes (start)
-	// exportBinaryPath: binary for genesis export (may differ if --export-version is set)
-	var customBinaryPath string
-	var exportBinaryPath string
-
-	// Docker mode uses GHCR package versions, not GitHub releases
-	if deployMode == "docker" {
-		resolvedImage, err := resolveDeployDockerImage(ctx, cmd, isInteractive, homeDir, fileCfg)
-		if err != nil {
-			return WrapInteractiveError(cmd, err, "failed to resolve docker image")
-		}
-		dockerImage = resolvedImage
-		startVersion = deployStableVersion
-	} else {
-		// Local mode: run interactive selection flow (local binary OR GitHub releases)
-		if isInteractive {
-			// includeNetworkSelection = false (network is already known from config)
-			// Pass deployNetwork so ConfirmSelection shows the correct network
-			// Pass deployBlockchainNetwork to fetch releases from the correct repository
-			selection, err := RunInteractiveVersionSelection(ctx, cmd, false, deployNetwork, deployBlockchainNetwork)
-			if err != nil {
-				return WrapInteractiveError(cmd, err, "failed during interactive selection")
-			}
-			startVersion = selection.StartVersion
-			deployStableVersion = startVersion
-
-			// If user selected a local binary, store it for later use
-			// This prevents the need to call selectBinaryForDeployment() again
-			if selection.BinarySource != nil && selection.BinarySource.IsLocal() && selection.BinarySource.SelectedPath != "" {
-				customBinaryPath = selection.BinarySource.SelectedPath
-			} else if selection.BinarySource != nil && selection.BinarySource.IsGitHubRelease() && startVersion != "" {
-				// User selected GitHub release - pre-build the binary now
-				// This prevents the binary selection prompt from appearing
-				buildResult, err := buildBinaryForDeploy(ctx, deployBlockchainNetwork, startVersion, deployNetwork, homeDir, logger)
-				if err != nil {
-					return fmt.Errorf("failed to pre-build binary: %w", err)
-				}
-				customBinaryPath = buildResult.BinaryPath
-				commitShort := buildResult.CommitHash
-				if len(commitShort) > 12 {
-					commitShort = commitShort[:12]
-				}
-				logger.Success("Binary pre-built and cached (commit: %s)", commitShort)
-			}
-		} else {
-			// Non-interactive: use --start-version if provided, otherwise fall back to --network-version
-			if deployStartVersion != "" {
-				startVersion = deployStartVersion
-			} else {
-				startVersion = deployStableVersion
-			}
-		}
+func validateDeployConfiguration(resolvedConfig *deployResolvedConfig) error {
+	if !types.NetworkSource(resolvedConfig.network).IsValid() {
+		return fmt.Errorf("invalid network: %s (must be 'mainnet' or 'testnet')", resolvedConfig.network)
 	}
 
-	// Validate inputs
-	if !types.NetworkSource(deployNetwork).IsValid() {
-		return fmt.Errorf("invalid network: %s (must be 'mainnet' or 'testnet')", deployNetwork)
-	}
-	// Validate validator count based on mode
-	if deployMode == string(types.ExecutionModeDocker) {
-		if deployValidators < 1 || deployValidators > 100 {
-			return fmt.Errorf("invalid validators: %d (must be 1-100 for docker mode)", deployValidators)
+	if resolvedConfig.mode == string(types.ExecutionModeDocker) {
+		if resolvedConfig.validators < 1 || resolvedConfig.validators > 100 {
+			return fmt.Errorf("invalid validators: %d (must be 1-100 for docker mode)", resolvedConfig.validators)
 		}
-	} else if deployMode == string(types.ExecutionModeLocal) {
-		if deployValidators < 1 || deployValidators > 4 {
-			return fmt.Errorf("invalid validators: %d (must be 1-4 for local mode)", deployValidators)
+	} else if resolvedConfig.mode == string(types.ExecutionModeLocal) {
+		if resolvedConfig.validators < 1 || resolvedConfig.validators > 4 {
+			return fmt.Errorf("invalid validators: %d (must be 1-4 for local mode)", resolvedConfig.validators)
 		}
-	} else {
-		return fmt.Errorf("invalid mode: %s (must be 'docker' or 'local')", deployMode)
-	}
-
-	// Validate port availability for local mode before proceeding
-	if deployMode == string(types.ExecutionModeLocal) {
-		if err := validateLocalModePorts(deployValidators); err != nil {
+		if err := validateLocalModePorts(resolvedConfig.validators); err != nil {
 			return err
 		}
+	} else {
+		return fmt.Errorf("invalid mode: %s (must be 'docker' or 'local')", resolvedConfig.mode)
 	}
 
-	// Check for deprecated --binary flag usage
-	if deployBinary != "" {
-		return fmt.Errorf(`the --binary flag has been removed in favor of interactive binary selection
+	return nil
+}
+
+func shouldRunDeployInteractiveSelection(jsonMode bool) bool {
+	return !deployNoInteractive && !jsonMode && deployBinary == ""
+}
+
+func prepareDeployInputs(deployCtx *deployContext, resolvedConfig *deployResolvedConfig) (*deployPreparedInputs, error) {
+	preparedInputs := &deployPreparedInputs{}
+
+	if resolvedConfig.mode == string(types.ExecutionModeDocker) {
+		resolvedImage, err := resolveDeployDockerImage(
+			deployCtx.ctx,
+			deployCtx.cmd,
+			resolvedConfig.isInteractive,
+			deployCtx.homeDir,
+			resolvedConfig.fileCfg,
+		)
+		if err != nil {
+			return nil, WrapInteractiveError(deployCtx.cmd, err, "failed to resolve docker image")
+		}
+		preparedInputs.dockerImage = resolvedImage
+		preparedInputs.startVersion = resolvedConfig.stableVersion
+	} else {
+		startVersion, customBinaryPath, err := resolveDeployLocalVersionSelection(deployCtx, resolvedConfig)
+		if err != nil {
+			return nil, err
+		}
+		preparedInputs.startVersion = startVersion
+		preparedInputs.customBinaryPath = customBinaryPath
+	}
+
+	if err := validateDeprecatedDeployBinaryFlag(); err != nil {
+		return nil, err
+	}
+
+	networkModule, err := resolveDeployNetworkModule(resolvedConfig.blockchainNetwork)
+	if err != nil {
+		return nil, err
+	}
+	preparedInputs.networkModule = networkModule
+
+	svc, err := application.GetServiceWithConfig(application.ServiceConfig{
+		HomeDir:       deployCtx.homeDir,
+		NetworkModule: networkModule,
+		DockerMode:    resolvedConfig.mode == string(types.ExecutionModeDocker),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize service: %w", err)
+	}
+	if svc.DevnetExists() {
+		return nil, fmt.Errorf("devnet already exists at %s\nUse 'devnet-builder destroy' to remove it first", deployCtx.homeDir)
+	}
+	preparedInputs.svc = svc
+
+	if resolvedConfig.mode == string(types.ExecutionModeLocal) {
+		customBinaryPath, exportBinaryPath, err := resolveLocalDeployBinaryPaths(deployCtx, resolvedConfig, preparedInputs)
+		if err != nil {
+			return nil, err
+		}
+		preparedInputs.customBinaryPath = customBinaryPath
+		preparedInputs.exportBinaryPath = exportBinaryPath
+	}
+
+	return preparedInputs, nil
+}
+
+func resolveDeployLocalVersionSelection(
+	deployCtx *deployContext,
+	resolvedConfig *deployResolvedConfig,
+) (string, string, error) {
+	startVersion := ""
+	customBinaryPath := ""
+
+	if resolvedConfig.isInteractive {
+		selection, err := RunInteractiveVersionSelection(
+			deployCtx.ctx,
+			deployCtx.cmd,
+			false,
+			resolvedConfig.network,
+			resolvedConfig.blockchainNetwork,
+		)
+		if err != nil {
+			return "", "", WrapInteractiveError(deployCtx.cmd, err, "failed during interactive selection")
+		}
+
+		startVersion = selection.StartVersion
+		deployStableVersion = startVersion
+
+		if selection.BinarySource != nil && selection.BinarySource.IsLocal() && selection.BinarySource.SelectedPath != "" {
+			customBinaryPath = selection.BinarySource.SelectedPath
+		} else if selection.BinarySource != nil && selection.BinarySource.IsGitHubRelease() && startVersion != "" {
+			buildResult, err := buildBinaryForDeploy(
+				deployCtx.ctx,
+				resolvedConfig.blockchainNetwork,
+				startVersion,
+				resolvedConfig.network,
+				deployCtx.homeDir,
+				deployCtx.logger,
+			)
+			if err != nil {
+				return "", "", fmt.Errorf("failed to pre-build binary: %w", err)
+			}
+			customBinaryPath = buildResult.BinaryPath
+			commitShort := buildResult.CommitHash
+			if len(commitShort) > 12 {
+				commitShort = commitShort[:12]
+			}
+			deployCtx.logger.Success("Binary pre-built and cached (commit: %s)", commitShort)
+		}
+	} else {
+		if deployStartVersion != "" {
+			startVersion = deployStartVersion
+		} else {
+			startVersion = resolvedConfig.stableVersion
+		}
+	}
+
+	return startVersion, customBinaryPath, nil
+}
+
+func validateDeprecatedDeployBinaryFlag() error {
+	if deployBinary == "" {
+		return nil
+	}
+
+	return fmt.Errorf(`the --binary flag has been removed in favor of interactive binary selection
 
 When you run 'devnet-builder deploy' in interactive mode, you will be prompted to:
 1. Choose between using a local binary or downloading from GitHub releases
@@ -335,137 +487,149 @@ Migration guide:
       devnet-builder deploy --mode docker --image your-image:tag
 
 For more information, see: https://github.com/altuslabsxyz/devnet-builder/blob/main/docs/MIGRATION.md`)
-	}
+}
 
-	// Validate blockchain network module exists
-	if !network.Has(deployBlockchainNetwork) {
+func resolveDeployNetworkModule(blockchainNetwork string) (network.NetworkModule, error) {
+	if !network.Has(blockchainNetwork) {
 		available := network.List()
-		return fmt.Errorf("unknown blockchain network: %s (available: %v)", deployBlockchainNetwork, available)
+		return nil, fmt.Errorf("unknown blockchain network: %s (available: %v)", blockchainNetwork, available)
 	}
 
-	// Get network module for DI container
-	networkModule, err := network.Get(deployBlockchainNetwork)
+	networkModule, err := network.Get(blockchainNetwork)
 	if err != nil {
-		return fmt.Errorf("failed to get network module: %w", err)
+		return nil, fmt.Errorf("failed to get network module: %w", err)
 	}
 
-	// Check if devnet already exists
-	svc, err := application.GetServiceWithConfig(application.ServiceConfig{
-		HomeDir:       homeDir,
-		NetworkModule: networkModule,
-		DockerMode:    deployMode == string(types.ExecutionModeDocker),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to initialize service: %w", err)
-	}
-	if svc.DevnetExists() {
-		return fmt.Errorf("devnet already exists at %s\nUse 'devnet-builder destroy' to remove it first", homeDir)
-	}
+	return networkModule, nil
+}
 
-	// Enable auto spinner for long-running operations
-	// The spinner will show after Success/Info logs and clear on next log
-	logger.SetAutoSpinner(true)
+func resolveLocalDeployBinaryPaths(
+	deployCtx *deployContext,
+	resolvedConfig *deployResolvedConfig,
+	preparedInputs *deployPreparedInputs,
+) (string, string, error) {
+	customBinaryPath := preparedInputs.customBinaryPath
 
-	// Build binary for local mode (all versions need to be built/cached)
-	// Priority: unified selection > cached binary > build from source
-	if deployMode == string(types.ExecutionModeLocal) {
-		// Check if binary was already selected via unified selection (interactive mode)
-		// If user selected a local binary via the filesystem browser, customBinaryPath is already set
-		if customBinaryPath == "" {
-			// No binary selected yet - fall back to old selection logic (for non-interactive mode)
-			// Interactive/Auto selection from cache (US1)
-			selectedPath, err := selectBinaryForDeployment(ctx, deployNetwork, deployBlockchainNetwork, homeDir, logger)
-			if err != nil {
-				return fmt.Errorf("binary selection failed: %w", err)
-			}
-
-			// If no binary selected (empty cache, no explicit build request)
-			// Priority 3: Build binary from source (existing behavior)
-			if selectedPath == "" {
-				buildResult, err := buildBinaryForDeploy(ctx, deployBlockchainNetwork, startVersion, deployNetwork, homeDir, logger)
-				if err != nil {
-					return fmt.Errorf("failed to build from source: %w", err)
-				}
-				customBinaryPath = buildResult.BinaryPath
-				logger.Success("Binary built: %s (commit: %s)", buildResult.BinaryPath, buildResult.CommitHash)
-			} else {
-				// Use the selected cached binary
-				customBinaryPath = selectedPath
-			}
-		} else {
-			// customBinaryPath already set from unified selection - use it directly
-			logger.Success("Using selected binary: %s", customBinaryPath)
+	if customBinaryPath == "" {
+		selectedPath, err := selectBinaryForDeployment(
+			deployCtx.ctx,
+			resolvedConfig.network,
+			resolvedConfig.blockchainNetwork,
+			deployCtx.homeDir,
+			deployCtx.logger,
+		)
+		if err != nil {
+			return "", "", fmt.Errorf("binary selection failed: %w", err)
 		}
 
-		// Handle --export-version flag for separate export binary
-		// This allows using a different binary version for genesis export
-		if deployExportVersion != "" {
-			logger.Info("Building export binary version: %s", deployExportVersion)
-			buildResult, err := buildBinaryForDeploy(ctx, deployBlockchainNetwork, deployExportVersion, deployNetwork, homeDir, logger)
+		if selectedPath == "" {
+			buildResult, err := buildBinaryForDeploy(
+				deployCtx.ctx,
+				resolvedConfig.blockchainNetwork,
+				preparedInputs.startVersion,
+				resolvedConfig.network,
+				deployCtx.homeDir,
+				deployCtx.logger,
+			)
 			if err != nil {
-				return fmt.Errorf("failed to build export binary: %w", err)
+				return "", "", fmt.Errorf("failed to build from source: %w", err)
 			}
-			exportBinaryPath = buildResult.BinaryPath
-			commitShort := buildResult.CommitHash
-			if len(commitShort) > 12 {
-				commitShort = commitShort[:12]
-			}
-			logger.Success("Export binary ready (version: %s, commit: %s)", deployExportVersion, commitShort)
+			customBinaryPath = buildResult.BinaryPath
+			deployCtx.logger.Success("Binary built: %s (commit: %s)", buildResult.BinaryPath, buildResult.CommitHash)
 		} else {
-			// No export version specified - use start binary for export too
-			exportBinaryPath = customBinaryPath
+			customBinaryPath = selectedPath
 		}
+	} else {
+		deployCtx.logger.Success("Using selected binary: %s", customBinaryPath)
 	}
 
-	// Phase 1: Provision using DevnetService
-	// Note: BinaryPath is used for genesis export, CustomBinaryPath is used for node startup
-	// When --export-version is specified, these may be different binaries
+	exportBinaryPath := customBinaryPath
+	if deployExportVersion != "" {
+		deployCtx.logger.Info("Building export binary version: %s", deployExportVersion)
+		buildResult, err := buildBinaryForDeploy(
+			deployCtx.ctx,
+			resolvedConfig.blockchainNetwork,
+			deployExportVersion,
+			resolvedConfig.network,
+			deployCtx.homeDir,
+			deployCtx.logger,
+		)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to build export binary: %w", err)
+		}
+		exportBinaryPath = buildResult.BinaryPath
+		commitShort := buildResult.CommitHash
+		if len(commitShort) > 12 {
+			commitShort = commitShort[:12]
+		}
+		deployCtx.logger.Success("Export binary ready (version: %s, commit: %s)", deployExportVersion, commitShort)
+	}
+
+	return customBinaryPath, exportBinaryPath, nil
+}
+
+func executeDeployment(
+	deployCtx *deployContext,
+	resolvedConfig *deployResolvedConfig,
+	preparedInputs *deployPreparedInputs,
+) (*deployExecutionResult, error) {
+	if resolvedConfig.mode == string(types.ExecutionModeDocker) {
+		return executeDockerDeployment(deployCtx, resolvedConfig, preparedInputs)
+	}
+	return executeLocalDeployment(deployCtx, resolvedConfig, preparedInputs)
+}
+
+func executeDockerDeployment(
+	deployCtx *deployContext,
+	resolvedConfig *deployResolvedConfig,
+	preparedInputs *deployPreparedInputs,
+) (*deployExecutionResult, error) {
+	return runDeployProvisionAndStart(deployCtx, resolvedConfig, preparedInputs)
+}
+
+func executeLocalDeployment(
+	deployCtx *deployContext,
+	resolvedConfig *deployResolvedConfig,
+	preparedInputs *deployPreparedInputs,
+) (*deployExecutionResult, error) {
+	return runDeployProvisionAndStart(deployCtx, resolvedConfig, preparedInputs)
+}
+
+func runDeployProvisionAndStart(
+	deployCtx *deployContext,
+	resolvedConfig *deployResolvedConfig,
+	preparedInputs *deployPreparedInputs,
+) (*deployExecutionResult, error) {
 	provisionInput := dto.ProvisionInput{
-		HomeDir:           homeDir,
-		Network:           deployNetwork,
-		BlockchainNetwork: deployBlockchainNetwork,
-		NumValidators:     deployValidators,
-		NumAccounts:       deployAccounts,
-		Mode:              deployMode,
-		StableVersion:     startVersion,
-		DockerImage:       dockerImage,
-		NoCache:           deployNoCache,
-		CustomBinaryPath:  customBinaryPath, // Binary for node startup
-		UseSnapshot:       deployFork,
-		BinaryPath:        exportBinaryPath, // Binary for genesis export (may differ with --export-version)
-		UseTestMnemonic:   deployTestMnemonic,
+		HomeDir:           deployCtx.homeDir,
+		Network:           resolvedConfig.network,
+		BlockchainNetwork: resolvedConfig.blockchainNetwork,
+		NumValidators:     resolvedConfig.validators,
+		NumAccounts:       resolvedConfig.accounts,
+		Mode:              resolvedConfig.mode,
+		StableVersion:     preparedInputs.startVersion,
+		DockerImage:       preparedInputs.dockerImage,
+		NoCache:           resolvedConfig.noCache,
+		CustomBinaryPath:  preparedInputs.customBinaryPath,
+		UseSnapshot:       resolvedConfig.fork,
+		BinaryPath:        preparedInputs.exportBinaryPath,
+		UseTestMnemonic:   resolvedConfig.testMnemonic,
 	}
 
-	_, err = svc.Provision(ctx, provisionInput)
+	if _, err := preparedInputs.svc.Provision(deployCtx.ctx, provisionInput); err != nil {
+		return nil, err
+	}
+
+	runResult, err := preparedInputs.svc.Start(deployCtx.ctx, 5*time.Minute)
 	if err != nil {
-		logger.SetAutoSpinner(false)
-		if jsonMode {
-			return outputDeployError(err)
-		}
-		return err
+		return nil, err
 	}
 
-	// Phase 2: Run using DevnetService
-	runResult, err := svc.Start(ctx, 5*time.Minute)
-	if err != nil {
-		logger.SetAutoSpinner(false)
-		if jsonMode {
-			return outputDeployError(err)
-		}
-		return err
-	}
-
-	// Get devnet info for output
-	devnetInfo, _ := svc.LoadDevnetInfo(ctx)
-
-	// Stop spinner before final output
-	logger.SetAutoSpinner(false)
-
-	// Output result
-	if jsonMode {
-		return outputDeployJSON(runResult, devnetInfo)
-	}
-	return outputDeployText(runResult, devnetInfo)
+	devnetInfo, _ := preparedInputs.svc.LoadDevnetInfo(deployCtx.ctx)
+	return &deployExecutionResult{
+		runResult:  runResult,
+		devnetInfo: devnetInfo,
+	}, nil
 }
 
 func outputDeployText(result *dto.RunOutput, devnetInfo *dto.DevnetInfo) error {
