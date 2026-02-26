@@ -31,6 +31,17 @@ type ProvisionUseCase struct {
 	logger          ports.Logger
 }
 
+type provisionPipelineState struct {
+	metadata     *ports.DevnetMetadata
+	rpcEndpoint  string
+	genesis      []byte
+	chainID      string
+	bech32Prefix string
+	accountsDir  string
+	nodes        []*ports.NodeMetadata
+	validators   []ports.ValidatorInfo
+}
+
 // NewProvisionUseCase creates a new ProvisionUseCase.
 func NewProvisionUseCase(
 	devnetRepo ports.DevnetRepository,
@@ -58,20 +69,36 @@ func NewProvisionUseCase(
 func (uc *ProvisionUseCase) Execute(ctx context.Context, input dto.ProvisionInput) (*dto.ProvisionOutput, error) {
 	uc.logger.Info("Provisioning devnet...")
 
-	// Check if devnet already exists
+	pipelineState, err := uc.prepareMetadata(input)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := uc.fetchGenesis(ctx, input, pipelineState); err != nil {
+		return nil, err
+	}
+
+	if err := uc.initializeKeysAndNodes(ctx, input, pipelineState); err != nil {
+		return nil, err
+	}
+
+	if err := uc.patchGenesis(ctx, input, pipelineState); err != nil {
+		return nil, err
+	}
+
+	return uc.persistState(ctx, input, pipelineState)
+}
+
+func (uc *ProvisionUseCase) prepareMetadata(input dto.ProvisionInput) (*provisionPipelineState, error) {
 	if uc.devnetRepo.Exists(input.HomeDir) {
 		return nil, fmt.Errorf("devnet already exists at %s", input.HomeDir)
 	}
 
-	// Determine execution mode
-	var execMode types.ExecutionMode
+	execMode := types.ExecutionModeLocal
 	if input.Mode == string(types.ExecutionModeDocker) {
 		execMode = types.ExecutionModeDocker
-	} else {
-		execMode = types.ExecutionModeLocal
 	}
 
-	// Create metadata
 	metadata := &ports.DevnetMetadata{
 		HomeDir:           input.HomeDir,
 		NetworkName:       input.Network,
@@ -83,163 +110,171 @@ func (uc *ProvisionUseCase) Execute(ctx context.Context, input dto.ProvisionInpu
 		Status:            ports.StateCreated,
 		DockerImage:       input.DockerImage,
 		CustomBinaryPath:  input.CustomBinaryPath,
-		InitialVersion:    input.StableVersion, // Store the deployed version
-		CurrentVersion:    input.StableVersion, // Initially same as deployed version
+		InitialVersion:    input.StableVersion,
+		CurrentVersion:    input.StableVersion,
 		CreatedAt:         time.Now(),
 	}
 
-	// Get RPC endpoint for fetching genesis
-	rpcEndpoint := ""
-	if uc.networkModule != nil {
-		rpcEndpoint = uc.networkModule.RPCEndpoint(input.Network)
+	if uc.networkModule == nil {
+		return nil, fmt.Errorf("no RPC endpoint available for network: %s", input.Network)
 	}
-
-	// Fetch genesis from RPC (required for initial provisioning)
+	rpcEndpoint := uc.networkModule.RPCEndpoint(input.Network)
 	if rpcEndpoint == "" {
 		return nil, fmt.Errorf("no RPC endpoint available for network: %s", input.Network)
 	}
 
-	uc.logger.Info("Fetching genesis from RPC %s...", rpcEndpoint)
-	rpcGenesis, err := uc.genesisSvc.FetchFromRPC(ctx, rpcEndpoint)
+	return &provisionPipelineState{
+		metadata:     metadata,
+		rpcEndpoint:  rpcEndpoint,
+		bech32Prefix: uc.networkModule.Bech32Prefix(),
+		accountsDir:  paths.DevnetAccountsPath(input.HomeDir),
+	}, nil
+}
+
+func (uc *ProvisionUseCase) fetchGenesis(ctx context.Context, input dto.ProvisionInput, state *provisionPipelineState) error {
+	uc.logger.Info("Fetching genesis from RPC %s...", state.rpcEndpoint)
+	rpcGenesis, err := uc.genesisSvc.FetchFromRPC(ctx, state.rpcEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch genesis from RPC: %w", err)
+		return fmt.Errorf("failed to fetch genesis from RPC: %w", err)
 	}
 
-	// Use snapshot-based export if requested
-	var genesis []byte
+	genesis := rpcGenesis
 	if input.UseSnapshot && uc.stateExportSvc != nil {
 		uc.logger.Info("Exporting genesis from snapshot state...")
 		genesis, err = uc.exportGenesisFromSnapshot(ctx, input, rpcGenesis)
 		if err != nil {
-			return nil, fmt.Errorf("failed to export genesis from snapshot: %w", err)
+			return fmt.Errorf("failed to export genesis from snapshot: %w", err)
 		}
-	} else {
-		genesis = rpcGenesis
 	}
 
-	// Determine chain ID to use from genesis
 	chainID, _ := extractChainID(genesis)
-	metadata.ChainID = chainID
+	state.metadata.ChainID = chainID
+	state.genesis = genesis
+	state.chainID = chainID
 
-	// Step 1: Create account keys for validators (for transaction signing)
+	return nil
+}
+
+func (uc *ProvisionUseCase) initializeKeysAndNodes(ctx context.Context, input dto.ProvisionInput, state *provisionPipelineState) error {
 	uc.logger.Info("Creating validator account keys...")
-	accountsDir := paths.DevnetAccountsPath(input.HomeDir)
-	accountKeys, err := uc.createAccountKeys(ctx, accountsDir, input.NumValidators, input.UseTestMnemonic)
+	accountKeys, err := uc.createAccountKeys(ctx, state.accountsDir, input.NumValidators, input.UseTestMnemonic)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create account keys: %w", err)
+		return fmt.Errorf("failed to create account keys: %w", err)
 	}
 
-	// Step 2: Initialize nodes to generate consensus keys (for block signing)
 	uc.logger.Info("Initializing validator nodes...")
-	nodes, err := uc.initializeNodes(ctx, input, chainID)
+	nodes, err := uc.initializeNodes(ctx, input, state.chainID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize nodes: %w", err)
+		return fmt.Errorf("failed to initialize nodes: %w", err)
 	}
 
-	// Step 2.1: Save validator key information to JSON files for export-keys command
 	uc.logger.Debug("Saving validator key information...")
-	if err := uc.saveValidatorKeys(input.HomeDir, accountKeys, uc.networkModule.Bech32Prefix()); err != nil {
-		return nil, fmt.Errorf("failed to save validator keys: %w", err)
+	if err := uc.saveValidatorKeys(input.HomeDir, accountKeys, state.bech32Prefix); err != nil {
+		return fmt.Errorf("failed to save validator keys: %w", err)
 	}
 
-	// Step 2.2: Create and save additional account keys (for testing/transactions)
 	if input.NumAccounts > 0 {
 		uc.logger.Info("Creating %d additional account keys...", input.NumAccounts)
-		additionalAccounts, err := uc.createAdditionalAccountKeys(ctx, accountsDir, input.NumAccounts, input.UseTestMnemonic, input.NumValidators)
+		additionalAccounts, err := uc.createAdditionalAccountKeys(ctx, state.accountsDir, input.NumAccounts, input.UseTestMnemonic, input.NumValidators)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create additional account keys: %w", err)
+			return fmt.Errorf("failed to create additional account keys: %w", err)
 		}
 
 		uc.logger.Debug("Saving account key information...")
 		if err := uc.saveAccountKeys(input.HomeDir, additionalAccounts); err != nil {
-			return nil, fmt.Errorf("failed to save account keys: %w", err)
+			return fmt.Errorf("failed to save account keys: %w", err)
 		}
 	}
 
-	// Step 2.5: Configure nodes with network-specific settings (config.toml, app.toml)
 	uc.logger.Info("Configuring node settings...")
-	if err := uc.configureNodes(ctx, nodes, chainID, input.NumValidators); err != nil {
-		return nil, fmt.Errorf("failed to configure nodes: %w", err)
+	if err := uc.configureNodes(ctx, nodes, state.chainID, input.NumValidators); err != nil {
+		return fmt.Errorf("failed to configure nodes: %w", err)
 	}
 
-	// Step 3: Build validator info combining consensus and account keys
 	uc.logger.Info("Building validator info...")
-	validators, err := uc.buildValidatorInfo(nodes, accountKeys, uc.networkModule.Bech32Prefix())
+	validators, err := uc.buildValidatorInfo(nodes, accountKeys, state.bech32Prefix)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build validator info: %w", err)
+		return fmt.Errorf("failed to build validator info: %w", err)
 	}
 
-	// Step 4: Modify genesis with validators
-	uc.logger.Info("Modifying genesis for devnet (chainID: %s)...", chainID)
+	state.nodes = nodes
+	state.validators = validators
+	return nil
+}
+
+func (uc *ProvisionUseCase) patchGenesis(ctx context.Context, input dto.ProvisionInput, state *provisionPipelineState) error {
+	genesis := state.genesis
+
+	uc.logger.Info("Modifying genesis for devnet (chainID: %s)...", state.chainID)
 	if uc.networkModule != nil {
 		opts := ports.GenesisModifyOptions{
-			ChainID:       chainID,
+			ChainID:       state.chainID,
 			NumValidators: input.NumValidators,
-			AddValidators: validators,
+			AddValidators: state.validators,
 		}
 
-		// Check genesis size - gRPC has 4MB default limit
-		const grpcSizeLimit = 4 * 1024 * 1024 // 4MB
+		const grpcSizeLimit = 4 * 1024 * 1024
 		if len(genesis) > grpcSizeLimit {
-			// Use file-based modification for large genesis (e.g., exported mainnet ~90MB)
 			uc.logger.Info("Using file-based genesis modification (size: %.1f MB)", float64(len(genesis))/(1024*1024))
 			modifiedGenesis, err := uc.modifyGenesisViaFile(ctx, genesis, opts, input.HomeDir)
 			if err != nil {
-				return nil, fmt.Errorf("failed to modify genesis via file: %w", err)
+				return fmt.Errorf("failed to modify genesis via file: %w", err)
 			}
 			genesis = modifiedGenesis
 		} else {
-			// Use standard in-memory modification for small genesis
 			modifiedGenesis, err := uc.networkModule.ModifyGenesis(genesis, opts)
 			if err != nil {
-				return nil, fmt.Errorf("failed to modify genesis: %w", err)
+				return fmt.Errorf("failed to modify genesis: %w", err)
 			}
 			genesis = modifiedGenesis
 		}
-		uc.logger.Debug("Genesis modified with %d validators", len(validators))
+		uc.logger.Debug("Genesis modified with %d validators", len(state.validators))
 	}
 
-	// Step 4: Write modified genesis to all nodes
-	for _, node := range nodes {
+	for _, node := range state.nodes {
 		genesisPath := filepath.Join(node.HomeDir, "config", "genesis.json")
 		if err := os.WriteFile(genesisPath, genesis, 0644); err != nil {
-			return nil, fmt.Errorf("failed to write genesis to node %d: %w", node.Index, err)
+			return fmt.Errorf("failed to write genesis to node %d: %w", node.Index, err)
 		}
 	}
 
-	// Set genesis path in metadata
-	if len(nodes) > 0 {
-		metadata.GenesisPath = filepath.Join(nodes[0].HomeDir, "config", "genesis.json")
+	if len(state.nodes) > 0 {
+		state.metadata.GenesisPath = filepath.Join(state.nodes[0].HomeDir, "config", "genesis.json")
 	}
 
-	// Update metadata
-	metadata.Status = ports.StateProvisioned
+	state.metadata.Status = ports.StateProvisioned
 	now := time.Now()
-	metadata.LastProvisioned = &now
+	state.metadata.LastProvisioned = &now
+	state.genesis = genesis
 
-	// Save metadata
-	if err := uc.devnetRepo.Save(ctx, metadata); err != nil {
+	return nil
+}
+
+func (uc *ProvisionUseCase) persistState(
+	ctx context.Context,
+	input dto.ProvisionInput,
+	state *provisionPipelineState,
+) (*dto.ProvisionOutput, error) {
+	if err := uc.devnetRepo.Save(ctx, state.metadata); err != nil {
 		return nil, fmt.Errorf("failed to save metadata: %w", err)
 	}
 
-	// Save nodes
-	for _, node := range nodes {
+	for _, node := range state.nodes {
 		if err := uc.nodeRepo.Save(ctx, node); err != nil {
 			uc.logger.Warn("Failed to save node %d: %v", node.Index, err)
 		}
 	}
 
-	// Build output
 	output := &dto.ProvisionOutput{
 		HomeDir:       input.HomeDir,
-		ChainID:       metadata.ChainID,
-		GenesisPath:   metadata.GenesisPath,
+		ChainID:       state.metadata.ChainID,
+		GenesisPath:   state.metadata.GenesisPath,
 		NumValidators: input.NumValidators,
 		NumAccounts:   input.NumAccounts,
-		Nodes:         make([]dto.NodeInfo, len(nodes)),
+		Nodes:         make([]dto.NodeInfo, len(state.nodes)),
 	}
 
-	for i, node := range nodes {
+	for i, node := range state.nodes {
 		output.Nodes[i] = dto.NodeInfo{
 			Index:   node.Index,
 			Name:    node.Name,
