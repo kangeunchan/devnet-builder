@@ -25,7 +25,33 @@ type ResumableExecuteUpgradeUseCase struct {
 	exportUC      ports.ExportUseCase
 	devnetRepo    ports.DevnetRepository
 	logger        ports.Logger
+	ops           *resumableUpgradeOps
 }
+
+type resumableUpgradeOps struct {
+	executeProposal      func(context.Context, dto.ProposeInput) (*dto.ProposeOutput, error)
+	executeVote          func(context.Context, dto.ExecuteUpgradeInput, *ports.UpgradeState) (*dto.VoteOutput, error)
+	waitForUpgradeHeight func(context.Context, int64) error
+	waitForChainHalt     func(context.Context, int64) error
+	executeSwitchBinary  func(context.Context, dto.ExecuteUpgradeInput, *ports.UpgradeState) (*dto.SwitchBinaryOutput, error)
+	verifyChainResumed   func(context.Context, string) (int64, error)
+	executeExport        func(context.Context, dto.ExportInput) (interface{}, error)
+	updateCurrentVersion func(context.Context, string, string) error
+	deleteState          func(context.Context) error
+	transitionAndSave    func(context.Context, *ports.UpgradeState, ports.ResumableStage, string) error
+}
+
+type resumableGovStageResult struct {
+	err                   error
+	preserveOutputOnError bool
+}
+
+type resumableGovStageHandler func(
+	context.Context,
+	dto.ExecuteUpgradeInput,
+	*ports.UpgradeState,
+	*dto.ExecuteUpgradeOutput,
+) resumableGovStageResult
 
 // NewResumableExecuteUpgradeUseCase creates a new ResumableExecuteUpgradeUseCase.
 func NewResumableExecuteUpgradeUseCase(
@@ -41,7 +67,7 @@ func NewResumableExecuteUpgradeUseCase(
 	devnetRepo ports.DevnetRepository,
 	logger ports.Logger,
 ) *ResumableExecuteUpgradeUseCase {
-	return &ResumableExecuteUpgradeUseCase{
+	uc := &ResumableExecuteUpgradeUseCase{
 		executeUC:     executeUC,
 		proposeUC:     proposeUC,
 		voteUC:        voteUC,
@@ -54,6 +80,50 @@ func NewResumableExecuteUpgradeUseCase(
 		devnetRepo:    devnetRepo,
 		logger:        logger,
 	}
+	uc.ops = uc.defaultOps()
+	return uc
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) defaultOps() *resumableUpgradeOps {
+	return &resumableUpgradeOps{
+		executeProposal: func(ctx context.Context, input dto.ProposeInput) (*dto.ProposeOutput, error) {
+			return uc.proposeUC.Execute(ctx, input)
+		},
+		executeVote: func(ctx context.Context, input dto.ExecuteUpgradeInput, state *ports.UpgradeState) (*dto.VoteOutput, error) {
+			return uc.executeVoting(ctx, input, state)
+		},
+		waitForUpgradeHeight: func(ctx context.Context, height int64) error {
+			return uc.executeUC.waitForUpgradeHeight(ctx, height)
+		},
+		waitForChainHalt: func(ctx context.Context, height int64) error {
+			return uc.executeUC.waitForChainHalt(ctx, height)
+		},
+		executeSwitchBinary: func(ctx context.Context, input dto.ExecuteUpgradeInput, state *ports.UpgradeState) (*dto.SwitchBinaryOutput, error) {
+			return uc.executeSwitchBinary(ctx, input, state)
+		},
+		verifyChainResumed: func(ctx context.Context, homeDir string) (int64, error) {
+			return uc.executeUC.verifyChainResumed(ctx, homeDir)
+		},
+		executeExport: func(ctx context.Context, input dto.ExportInput) (interface{}, error) {
+			return uc.exportUC.Execute(ctx, input)
+		},
+		updateCurrentVersion: func(ctx context.Context, homeDir, version string) error {
+			return uc.executeUC.updateCurrentVersion(ctx, homeDir, version)
+		},
+		deleteState: func(ctx context.Context) error {
+			return uc.stateManager.DeleteState(ctx)
+		},
+		transitionAndSave: func(ctx context.Context, state *ports.UpgradeState, target ports.ResumableStage, reason string) error {
+			return uc.transitionAndSave(ctx, state, target, reason)
+		},
+	}
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) getOps() *resumableUpgradeOps {
+	if uc.ops == nil {
+		uc.ops = uc.defaultOps()
+	}
+	return uc.ops
 }
 
 // Execute performs the upgrade workflow with state persistence.
@@ -174,225 +244,291 @@ func (uc *ResumableExecuteUpgradeUseCase) executeWithGovResumable(
 	startTime time.Time,
 ) (*dto.ExecuteUpgradeOutput, error) {
 	output := &dto.ExecuteUpgradeOutput{}
-
-	// Pre-upgrade export (only if starting fresh and enabled)
-	if state.Stage == ports.ResumableStageInitialized && input.WithExport {
-		uc.logger.Info("Pre-upgrade: Exporting state before upgrade...")
-		exportInput := dto.ExportInput{
-			HomeDir:   input.HomeDir,
-			OutputDir: input.GenesisDir,
-			Force:     false,
-		}
-
-		preExportResultRaw, err := uc.exportUC.Execute(ctx, exportInput)
-		if err != nil {
-			uc.logger.Error("Pre-upgrade export failed: %v", err)
-			output.Error = fmt.Errorf("pre-upgrade export failed: %w", err)
-			return output, output.Error
-		}
-		if preExportResult, ok := preExportResultRaw.(*dto.ExportOutput); ok {
-			output.PreGenesisPath = preExportResult.ExportPath
-			uc.logger.Success("Pre-upgrade export complete: %s", preExportResult.ExportPath)
-		}
+	if err := uc.runPreUpgradeExport(ctx, input, state, output); err != nil {
+		output.Error = err
+		return output, err
 	}
 
-	// Resume from current stage
+	handlers := uc.govResumableStageHandlers()
+	for {
+		if terminalOutput, terminalErr, done := uc.handleGovTerminalStage(ctx, input, state, startTime, output); done {
+			return terminalOutput, terminalErr
+		}
+
+		handler, ok := handlers[state.Stage]
+		if !ok {
+			return nil, fmt.Errorf("cannot resume from stage: %s", state.Stage)
+		}
+
+		outcome := handler(ctx, input, state, output)
+		if outcome.err != nil {
+			if outcome.preserveOutputOnError {
+				return output, outcome.err
+			}
+			return nil, outcome.err
+		}
+	}
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) runPreUpgradeExport(
+	ctx context.Context,
+	input dto.ExecuteUpgradeInput,
+	state *ports.UpgradeState,
+	output *dto.ExecuteUpgradeOutput,
+) error {
+	if state.Stage != ports.ResumableStageInitialized || !input.WithExport {
+		return nil
+	}
+	ops := uc.getOps()
+
+	uc.logger.Info("Pre-upgrade: Exporting state before upgrade...")
+	exportInput := dto.ExportInput{
+		HomeDir:   input.HomeDir,
+		OutputDir: input.GenesisDir,
+		Force:     false,
+	}
+
+	preExportResultRaw, err := ops.executeExport(ctx, exportInput)
+	if err != nil {
+		uc.logger.Error("Pre-upgrade export failed: %v", err)
+		return fmt.Errorf("pre-upgrade export failed: %w", err)
+	}
+	if preExportResult, ok := preExportResultRaw.(*dto.ExportOutput); ok {
+		output.PreGenesisPath = preExportResult.ExportPath
+		uc.logger.Success("Pre-upgrade export complete: %s", preExportResult.ExportPath)
+	}
+
+	return nil
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) govResumableStageHandlers() map[ports.ResumableStage]resumableGovStageHandler {
+	return map[ports.ResumableStage]resumableGovStageHandler{
+		ports.ResumableStageInitialized:       uc.handleGovStageInitialized,
+		ports.ResumableStageProposalSubmitted: uc.handleGovStageProposalSubmitted,
+		ports.ResumableStageVoting:            uc.handleGovStageVoting,
+		ports.ResumableStageWaitingForHeight:  uc.handleGovStageWaitingForHeight,
+		ports.ResumableStageChainHalted:       uc.handleGovStageChainHalted,
+		ports.ResumableStageSwitchingBinary:   uc.handleGovStageSwitchingBinary,
+		ports.ResumableStageVerifyingResume:   uc.handleGovStageVerifyingResume,
+	}
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) handleGovTerminalStage(
+	ctx context.Context,
+	input dto.ExecuteUpgradeInput,
+	state *ports.UpgradeState,
+	startTime time.Time,
+	output *dto.ExecuteUpgradeOutput,
+) (*dto.ExecuteUpgradeOutput, error, bool) {
+	ops := uc.getOps()
+
 	switch state.Stage {
-	case ports.ResumableStageInitialized:
-		// Step 1: Submit proposal
-		uc.logger.Info("Step 1/5: Submitting upgrade proposal...")
-		proposeResult, err := uc.proposeUC.Execute(ctx, dto.ProposeInput{
-			HomeDir:       input.HomeDir,
-			UpgradeName:   input.UpgradeName,
-			UpgradeHeight: input.UpgradeHeight,
-			VotingPeriod:  input.VotingPeriod,
-			HeightBuffer:  input.HeightBuffer,
-		})
-		if err != nil {
-			if saveErr := uc.transitionAndSave(ctx, state, ports.ResumableStageFailed, err.Error()); saveErr != nil {
-				uc.logger.Warn("Failed to save failed state: %v", saveErr)
-			}
-			output.Error = err
-			return output, err
-		}
-
-		// Update state with proposal info
-		state.ProposalID = proposeResult.ProposalID
-		state.UpgradeHeight = proposeResult.UpgradeHeight
-		output.ProposalID = proposeResult.ProposalID
-		output.UpgradeHeight = proposeResult.UpgradeHeight
-
-		// Transition to ProposalSubmitted
-		if err := uc.transitionAndSave(ctx, state, ports.ResumableStageProposalSubmitted, fmt.Sprintf("proposal %d submitted", proposeResult.ProposalID)); err != nil {
-			return nil, err
-		}
-		fallthrough
-
-	case ports.ResumableStageProposalSubmitted:
-		// Transition to Voting (deposit period complete in devnet context)
-		if err := uc.transitionAndSave(ctx, state, ports.ResumableStageVoting, "voting period started"); err != nil {
-			return nil, err
-		}
-		fallthrough
-
-	case ports.ResumableStageVoting:
-		// Step 2: Vote from all validators
-		uc.logger.Info("Step 2/5: Voting from all validators...")
-		output.ProposalID = state.ProposalID
-		output.UpgradeHeight = state.UpgradeHeight
-
-		voteResult, err := uc.executeVoting(ctx, input, state)
-		if err != nil {
-			if saveErr := uc.transitionAndSave(ctx, state, ports.ResumableStageFailed, err.Error()); saveErr != nil {
-				uc.logger.Warn("Failed to save failed state: %v", saveErr)
-			}
-			output.Error = err
-			return output, err
-		}
-
-		if voteResult.VotesCast != voteResult.TotalVoters {
-			err := fmt.Errorf("not all votes cast: %d/%d", voteResult.VotesCast, voteResult.TotalVoters)
-			if saveErr := uc.transitionAndSave(ctx, state, ports.ResumableStageFailed, err.Error()); saveErr != nil {
-				uc.logger.Warn("Failed to save failed state: %v", saveErr)
-			}
-			output.Error = err
-			return output, err
-		}
-
-		// Transition to WaitingForHeight
-		if err := uc.transitionAndSave(ctx, state, ports.ResumableStageWaitingForHeight, "voting complete, proposal passed"); err != nil {
-			return nil, err
-		}
-		fallthrough
-
-	case ports.ResumableStageWaitingForHeight:
-		// Step 3: Wait for upgrade height
-		uc.logger.Info("Step 3/5: Waiting for upgrade height %d...", state.UpgradeHeight)
-		output.ProposalID = state.ProposalID
-		output.UpgradeHeight = state.UpgradeHeight
-
-		if err := uc.executeUC.waitForUpgradeHeight(ctx, state.UpgradeHeight); err != nil {
-			if saveErr := uc.transitionAndSave(ctx, state, ports.ResumableStageFailed, err.Error()); saveErr != nil {
-				uc.logger.Warn("Failed to save failed state: %v", saveErr)
-			}
-			output.Error = err
-			return output, err
-		}
-
-		// Transition to ChainHalted
-		if err := uc.transitionAndSave(ctx, state, ports.ResumableStageChainHalted, "upgrade height reached"); err != nil {
-			return nil, err
-		}
-		fallthrough
-
-	case ports.ResumableStageChainHalted:
-		// Step 4: Wait for chain halt
-		uc.logger.Info("Step 4/5: Waiting for chain to halt...")
-		output.ProposalID = state.ProposalID
-		output.UpgradeHeight = state.UpgradeHeight
-
-		if err := uc.executeUC.waitForChainHalt(ctx, state.UpgradeHeight); err != nil {
-			if saveErr := uc.transitionAndSave(ctx, state, ports.ResumableStageFailed, err.Error()); saveErr != nil {
-				uc.logger.Warn("Failed to save failed state: %v", saveErr)
-			}
-			output.Error = err
-			return output, err
-		}
-
-		// Transition to SwitchingBinary
-		if err := uc.transitionAndSave(ctx, state, ports.ResumableStageSwitchingBinary, "chain halted at upgrade height"); err != nil {
-			return nil, err
-		}
-		fallthrough
-
-	case ports.ResumableStageSwitchingBinary:
-		// Step 5: Switch binary
-		uc.logger.Info("Step 5/5: Switching binary...")
-		output.ProposalID = state.ProposalID
-		output.UpgradeHeight = state.UpgradeHeight
-
-		switchResult, err := uc.executeSwitchBinary(ctx, input, state)
-		if err != nil {
-			if saveErr := uc.transitionAndSave(ctx, state, ports.ResumableStageFailed, err.Error()); saveErr != nil {
-				uc.logger.Warn("Failed to save failed state: %v", saveErr)
-			}
-			output.Error = err
-			return output, err
-		}
-		output.NewBinary = switchResult.NewBinary
-
-		// Transition to VerifyingResume
-		if err := uc.transitionAndSave(ctx, state, ports.ResumableStageVerifyingResume, "binary switch complete"); err != nil {
-			return nil, err
-		}
-		fallthrough
-
-	case ports.ResumableStageVerifyingResume:
-		// Verify chain resumed
-		output.ProposalID = state.ProposalID
-		output.UpgradeHeight = state.UpgradeHeight
-
-		postHeight, err := uc.executeUC.verifyChainResumed(ctx, input.HomeDir)
-		if err != nil {
-			if saveErr := uc.transitionAndSave(ctx, state, ports.ResumableStageFailed, err.Error()); saveErr != nil {
-				uc.logger.Warn("Failed to save failed state: %v", saveErr)
-			}
-			output.Error = err
-			return output, err
-		}
-		output.PostUpgradeHeight = postHeight
-
-		// Post-upgrade export (if enabled)
-		if input.WithExport {
-			uc.logger.Info("Post-upgrade: Exporting state after upgrade...")
-			exportInput := dto.ExportInput{
-				HomeDir:   input.HomeDir,
-				OutputDir: input.GenesisDir,
-				Force:     false,
-			}
-
-			postExportResultRaw, err := uc.exportUC.Execute(ctx, exportInput)
-			if err != nil {
-				uc.logger.Warn("Post-upgrade export failed: %v", err)
-			} else if postExportResult, ok := postExportResultRaw.(*dto.ExportOutput); ok {
-				output.PostGenesisPath = postExportResult.ExportPath
-				uc.logger.Success("Post-upgrade export complete: %s", postExportResult.ExportPath)
-			}
-		}
-
-		// Transition to Completed
-		if err := uc.transitionAndSave(ctx, state, ports.ResumableStageCompleted, "chain verified healthy"); err != nil {
-			return nil, err
-		}
-		fallthrough
-
 	case ports.ResumableStageCompleted:
-		// Update metadata version
 		if input.TargetVersion != "" {
-			if err := uc.executeUC.updateCurrentVersion(ctx, input.HomeDir, input.TargetVersion); err != nil {
+			if err := ops.updateCurrentVersion(ctx, input.HomeDir, input.TargetVersion); err != nil {
 				uc.logger.Warn("Failed to update version in metadata: %v", err)
 			}
 		}
 
-		// Delete state file on success
-		if err := uc.stateManager.DeleteState(ctx); err != nil {
+		if err := ops.deleteState(ctx); err != nil {
 			uc.logger.Warn("Failed to delete state file: %v", err)
 		}
 
 		output.Success = true
 		output.Duration = time.Since(startTime)
 		uc.logger.Success("Upgrade complete! Duration: %v", output.Duration)
-		return output, nil
-
+		return output, nil, true
 	case ports.ResumableStageFailed:
-		return nil, fmt.Errorf("upgrade previously failed: %s (use --force-restart to start fresh)", state.Error)
-
+		return nil, fmt.Errorf("upgrade previously failed: %s (use --force-restart to start fresh)", state.Error), true
 	case ports.ResumableStageProposalRejected:
-		return nil, fmt.Errorf("proposal was rejected (use --force-restart to start fresh)")
-
+		return nil, fmt.Errorf("proposal was rejected (use --force-restart to start fresh)"), true
 	default:
-		return nil, fmt.Errorf("cannot resume from stage: %s", state.Stage)
+		return nil, nil, false
 	}
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) handleGovStageInitialized(
+	ctx context.Context,
+	input dto.ExecuteUpgradeInput,
+	state *ports.UpgradeState,
+	output *dto.ExecuteUpgradeOutput,
+) resumableGovStageResult {
+	ops := uc.getOps()
+	uc.logger.Info("Step 1/5: Submitting upgrade proposal...")
+
+	proposeResult, err := ops.executeProposal(ctx, dto.ProposeInput{
+		HomeDir:       input.HomeDir,
+		UpgradeName:   input.UpgradeName,
+		UpgradeHeight: input.UpgradeHeight,
+		VotingPeriod:  input.VotingPeriod,
+		HeightBuffer:  input.HeightBuffer,
+	})
+	if err != nil {
+		return uc.failGovStage(ctx, state, output, err)
+	}
+
+	state.ProposalID = proposeResult.ProposalID
+	state.UpgradeHeight = proposeResult.UpgradeHeight
+	output.ProposalID = proposeResult.ProposalID
+	output.UpgradeHeight = proposeResult.UpgradeHeight
+
+	return uc.advanceGovStage(
+		ctx,
+		state,
+		ports.ResumableStageProposalSubmitted,
+		fmt.Sprintf("proposal %d submitted", proposeResult.ProposalID),
+	)
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) handleGovStageProposalSubmitted(
+	ctx context.Context,
+	_ dto.ExecuteUpgradeInput,
+	state *ports.UpgradeState,
+	_ *dto.ExecuteUpgradeOutput,
+) resumableGovStageResult {
+	return uc.advanceGovStage(ctx, state, ports.ResumableStageVoting, "voting period started")
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) handleGovStageVoting(
+	ctx context.Context,
+	input dto.ExecuteUpgradeInput,
+	state *ports.UpgradeState,
+	output *dto.ExecuteUpgradeOutput,
+) resumableGovStageResult {
+	ops := uc.getOps()
+	uc.logger.Info("Step 2/5: Voting from all validators...")
+	output.ProposalID = state.ProposalID
+	output.UpgradeHeight = state.UpgradeHeight
+
+	voteResult, err := ops.executeVote(ctx, input, state)
+	if err != nil {
+		return uc.failGovStage(ctx, state, output, err)
+	}
+
+	if voteResult.VotesCast != voteResult.TotalVoters {
+		return uc.failGovStage(ctx, state, output, fmt.Errorf("not all votes cast: %d/%d", voteResult.VotesCast, voteResult.TotalVoters))
+	}
+
+	return uc.advanceGovStage(ctx, state, ports.ResumableStageWaitingForHeight, "voting complete, proposal passed")
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) handleGovStageWaitingForHeight(
+	ctx context.Context,
+	_ dto.ExecuteUpgradeInput,
+	state *ports.UpgradeState,
+	output *dto.ExecuteUpgradeOutput,
+) resumableGovStageResult {
+	ops := uc.getOps()
+	uc.logger.Info("Step 3/5: Waiting for upgrade height %d...", state.UpgradeHeight)
+	output.ProposalID = state.ProposalID
+	output.UpgradeHeight = state.UpgradeHeight
+
+	if err := ops.waitForUpgradeHeight(ctx, state.UpgradeHeight); err != nil {
+		return uc.failGovStage(ctx, state, output, err)
+	}
+
+	return uc.advanceGovStage(ctx, state, ports.ResumableStageChainHalted, "upgrade height reached")
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) handleGovStageChainHalted(
+	ctx context.Context,
+	_ dto.ExecuteUpgradeInput,
+	state *ports.UpgradeState,
+	output *dto.ExecuteUpgradeOutput,
+) resumableGovStageResult {
+	ops := uc.getOps()
+	uc.logger.Info("Step 4/5: Waiting for chain to halt...")
+	output.ProposalID = state.ProposalID
+	output.UpgradeHeight = state.UpgradeHeight
+
+	if err := ops.waitForChainHalt(ctx, state.UpgradeHeight); err != nil {
+		return uc.failGovStage(ctx, state, output, err)
+	}
+
+	return uc.advanceGovStage(ctx, state, ports.ResumableStageSwitchingBinary, "chain halted at upgrade height")
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) handleGovStageSwitchingBinary(
+	ctx context.Context,
+	input dto.ExecuteUpgradeInput,
+	state *ports.UpgradeState,
+	output *dto.ExecuteUpgradeOutput,
+) resumableGovStageResult {
+	ops := uc.getOps()
+	uc.logger.Info("Step 5/5: Switching binary...")
+	output.ProposalID = state.ProposalID
+	output.UpgradeHeight = state.UpgradeHeight
+
+	switchResult, err := ops.executeSwitchBinary(ctx, input, state)
+	if err != nil {
+		return uc.failGovStage(ctx, state, output, err)
+	}
+	output.NewBinary = switchResult.NewBinary
+
+	return uc.advanceGovStage(ctx, state, ports.ResumableStageVerifyingResume, "binary switch complete")
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) handleGovStageVerifyingResume(
+	ctx context.Context,
+	input dto.ExecuteUpgradeInput,
+	state *ports.UpgradeState,
+	output *dto.ExecuteUpgradeOutput,
+) resumableGovStageResult {
+	ops := uc.getOps()
+	output.ProposalID = state.ProposalID
+	output.UpgradeHeight = state.UpgradeHeight
+
+	postHeight, err := ops.verifyChainResumed(ctx, input.HomeDir)
+	if err != nil {
+		return uc.failGovStage(ctx, state, output, err)
+	}
+	output.PostUpgradeHeight = postHeight
+
+	if input.WithExport {
+		uc.logger.Info("Post-upgrade: Exporting state after upgrade...")
+		exportInput := dto.ExportInput{
+			HomeDir:   input.HomeDir,
+			OutputDir: input.GenesisDir,
+			Force:     false,
+		}
+
+		postExportResultRaw, err := ops.executeExport(ctx, exportInput)
+		if err != nil {
+			uc.logger.Warn("Post-upgrade export failed: %v", err)
+		} else if postExportResult, ok := postExportResultRaw.(*dto.ExportOutput); ok {
+			output.PostGenesisPath = postExportResult.ExportPath
+			uc.logger.Success("Post-upgrade export complete: %s", postExportResult.ExportPath)
+		}
+	}
+
+	return uc.advanceGovStage(ctx, state, ports.ResumableStageCompleted, "chain verified healthy")
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) failGovStage(
+	ctx context.Context,
+	state *ports.UpgradeState,
+	output *dto.ExecuteUpgradeOutput,
+	err error,
+) resumableGovStageResult {
+	ops := uc.getOps()
+	if saveErr := ops.transitionAndSave(ctx, state, ports.ResumableStageFailed, err.Error()); saveErr != nil {
+		uc.logger.Warn("Failed to save failed state: %v", saveErr)
+	}
+	output.Error = err
+	return resumableGovStageResult{err: err, preserveOutputOnError: true}
+}
+
+func (uc *ResumableExecuteUpgradeUseCase) advanceGovStage(
+	ctx context.Context,
+	state *ports.UpgradeState,
+	target ports.ResumableStage,
+	reason string,
+) resumableGovStageResult {
+	ops := uc.getOps()
+	if err := ops.transitionAndSave(ctx, state, target, reason); err != nil {
+		return resumableGovStageResult{err: err}
+	}
+	return resumableGovStageResult{}
 }
 
 // executeSwitchBinary handles binary switching with per-node tracking.
