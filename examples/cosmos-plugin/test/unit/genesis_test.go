@@ -1,13 +1,16 @@
 package unit
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/internal/plugin"
+	cosmos "github.com/altuslabsxyz/devnet-builder/examples/cosmos-plugin/plugin"
 	"github.com/altuslabsxyz/devnet-builder/pkg/network"
 )
 
@@ -92,6 +95,13 @@ func TestModifyGenesis_AppliesCoreDevnetMutations(t *testing.T) {
 				SelfDelegation:  "1000000",
 			},
 		},
+		AddAccounts: []network.GenesisAccountInfo{
+			{
+				Name:    "account0",
+				Address: "cosmos1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqps2m9",
+				Balance: "2500000uatom",
+			},
+		},
 	}
 
 	out, err := networkModule.ModifyGenesis(input, opts)
@@ -158,6 +168,10 @@ func TestModifyGenesis_AppliesCoreDevnetMutations(t *testing.T) {
 	}
 
 	bank, _ := asMap(appState["bank"])
+	balances, _ := asSlice(bank["balances"])
+	if !hasBalanceCoinAtLeast(balances, "cosmos1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqps2m9", "uatom", "2500000") {
+		t.Fatalf("bank balances should include funded additional account")
+	}
 	supply, _ := asSlice(bank["supply"])
 	if len(supply) == 0 {
 		t.Fatalf("bank supply should be recomputed")
@@ -511,4 +525,182 @@ func TestModifyGenesisFile_HandlesModuleOrderIndependently(t *testing.T) {
 	if !foundBondedPool {
 		t.Fatalf("bonded_tokens_pool balance not found - auth module data not used in bank patching")
 	}
+}
+
+func TestModifyGenesisFile_MatchesInMemoryForAdditionalAccounts(t *testing.T) {
+	networkModule := cosmos.New()
+	tmpDir := t.TempDir()
+
+	input := mustMarshalJSON(t, map[string]any{
+		"chain_id":   "cosmoshub-4",
+		"validators": []any{},
+		"app_state": map[string]any{
+			"gov":          map[string]any{"params": map[string]any{}},
+			"staking":      map[string]any{"params": map[string]any{}, "pool": map[string]any{}},
+			"slashing":     map[string]any{},
+			"distribution": map[string]any{},
+			"auth":         map[string]any{"accounts": []any{}},
+			"bank":         map[string]any{"balances": []any{}, "supply": []any{}},
+			"genutil":      map[string]any{"gen_txs": []any{}},
+		},
+	})
+
+	opts := network.GenesisOptions{
+		ChainID: "cosmosdevnet-3",
+		Validators: []network.ValidatorInfo{
+			{
+				Moniker:         "validator-0",
+				ConsPubKey:      "dGVzdC1wdWJrZXk=",
+				OperatorAddress: "cosmosvaloper1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8tx58h",
+				SelfDelegation:  "1000000",
+			},
+		},
+		AddAccounts: []network.GenesisAccountInfo{
+			{
+				Name:    "account0",
+				Address: "cosmos1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqps2m9",
+				Balance: "2500000uatom",
+			},
+		},
+	}
+
+	inMemory, err := networkModule.ModifyGenesis(input, opts)
+	if err != nil {
+		t.Fatalf("ModifyGenesis returned error: %v", err)
+	}
+
+	inputPath := filepath.Join(tmpDir, "input.json")
+	outputPath := filepath.Join(tmpDir, "output.json")
+	if err := os.WriteFile(inputPath, input, 0o644); err != nil {
+		t.Fatalf("failed to write input genesis: %v", err)
+	}
+
+	if _, err := networkModule.ModifyGenesisFile(inputPath, outputPath, opts); err != nil {
+		t.Fatalf("ModifyGenesisFile returned error: %v", err)
+	}
+
+	fileBased, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("failed to read output genesis: %v", err)
+	}
+
+	var inMemGen map[string]any
+	if err := json.Unmarshal(inMemory, &inMemGen); err != nil {
+		t.Fatalf("failed to unmarshal in-memory genesis: %v", err)
+	}
+	var fileGen map[string]any
+	if err := json.Unmarshal(fileBased, &fileGen); err != nil {
+		t.Fatalf("failed to unmarshal file-based genesis: %v", err)
+	}
+
+	inMemApp, _ := asMap(inMemGen["app_state"])
+	fileApp, _ := asMap(fileGen["app_state"])
+	inMemBank, _ := asMap(inMemApp["bank"])
+	fileBank, _ := asMap(fileApp["bank"])
+
+	inMemBalances, _ := asSlice(inMemBank["balances"])
+	fileBalances, _ := asSlice(fileBank["balances"])
+
+	if !hasBalanceCoinAtLeast(inMemBalances, "cosmos1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqps2m9", "uatom", "2500000") {
+		t.Fatalf("in-memory genesis is missing expected additional account funding")
+	}
+	if !hasBalanceCoinAtLeast(fileBalances, "cosmos1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqps2m9", "uatom", "2500000") {
+		t.Fatalf("file-based genesis is missing expected additional account funding")
+	}
+}
+
+func TestModifyGenesisFile_HandlesLargeGenesisOver50MB(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large genesis test in short mode")
+	}
+
+	networkModule := cosmos.New()
+	tmpDir := t.TempDir()
+
+	inputPath := filepath.Join(tmpDir, "input-large.json")
+	outputPath := filepath.Join(tmpDir, "output-large.json")
+
+	largeBlob := strings.Repeat("x", 55*1024*1024)
+	input := mustMarshalJSON(t, map[string]any{
+		"chain_id":   "cosmoshub-4",
+		"validators": []any{},
+		"app_state": map[string]any{
+			"gov":          map[string]any{"params": map[string]any{}},
+			"staking":      map[string]any{"params": map[string]any{}, "pool": map[string]any{}},
+			"slashing":     map[string]any{},
+			"distribution": map[string]any{},
+			"auth":         map[string]any{"accounts": []any{}},
+			"bank":         map[string]any{"balances": []any{}, "supply": []any{}},
+			"genutil":      map[string]any{"gen_txs": []any{}},
+			"large_module": map[string]any{"blob": largeBlob},
+		},
+	})
+	if err := os.WriteFile(inputPath, input, 0o644); err != nil {
+		t.Fatalf("failed to write large input genesis: %v", err)
+	}
+
+	opts := network.GenesisOptions{
+		ChainID: "cosmosdevnet-large",
+		Validators: []network.ValidatorInfo{
+			{
+				Moniker:         "validator-0",
+				ConsPubKey:      "dGVzdC1wdWJrZXk=",
+				OperatorAddress: "cosmosvaloper1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq8tx58h",
+				SelfDelegation:  "1000000",
+			},
+		},
+	}
+
+	outputSize, err := networkModule.ModifyGenesisFile(inputPath, outputPath, opts)
+	if err != nil {
+		t.Fatalf("ModifyGenesisFile returned error for large genesis: %v", err)
+	}
+	if outputSize <= 50*1024*1024 {
+		t.Fatalf("expected output larger than 50MB, got %d bytes", outputSize)
+	}
+
+	out, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("failed to read large output genesis: %v", err)
+	}
+	if !bytes.Contains(out, []byte("cosmosdevnet-large")) {
+		t.Fatalf("large output genesis does not contain updated chain id")
+	}
+}
+
+func hasBalanceCoinAtLeast(balances []any, address, denom, expectedAmount string) bool {
+	expected, ok := new(big.Int).SetString(expectedAmount, 10)
+	if !ok {
+		return false
+	}
+
+	for _, raw := range balances {
+		balance, ok := asMap(raw)
+		if !ok {
+			continue
+		}
+		addr, _ := balance["address"].(string)
+		if addr != address {
+			continue
+		}
+
+		coins, _ := asSlice(balance["coins"])
+		for _, coinRaw := range coins {
+			coinMap, ok := asMap(coinRaw)
+			if !ok {
+				continue
+			}
+			if coinMap["denom"] != denom {
+				continue
+			}
+			amount := strings.TrimSpace(fmt.Sprint(coinMap["amount"]))
+			got, ok := new(big.Int).SetString(amount, 10)
+			if !ok {
+				continue
+			}
+			return got.Cmp(expected) >= 0
+		}
+	}
+
+	return false
 }

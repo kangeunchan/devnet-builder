@@ -3,6 +3,8 @@ package cosmos
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/pkg/network"
@@ -11,6 +13,21 @@ import (
 // CosmosNetwork implements network.Module for Cosmos Hub.
 type CosmosNetwork struct {
 	runCmd commandRunnerFunc
+	hooks  Hooks
+
+	customizationFromFile   Customization
+	customizationFromOption Customization
+	customization           Customization
+
+	profiles         map[string]networkProfile
+	restToRPCHostMap map[string]string
+	rpcToRESTHostMap map[string]string
+
+	requestTimeout         time.Duration
+	waitBlockTimeout       time.Duration
+	snapshotResolveTimeout time.Duration
+
+	initErr error
 }
 
 // Option configures CosmosNetwork construction.
@@ -24,11 +41,14 @@ func New(opts ...Option) *CosmosNetwork {
 	networkModule := &CosmosNetwork{
 		runCmd: runCommand,
 	}
+
 	for _, opt := range opts {
 		if opt != nil {
 			opt(networkModule)
 		}
 	}
+
+	networkModule.applyConfiguration()
 
 	return networkModule
 }
@@ -56,7 +76,7 @@ func (n *CosmosNetwork) DisplayName() string {
 }
 
 func (n *CosmosNetwork) Version() string {
-	return "1.1.0"
+	return "1.2.0"
 }
 
 // ============================================
@@ -64,6 +84,9 @@ func (n *CosmosNetwork) Version() string {
 // ============================================
 
 func (n *CosmosNetwork) BinaryName() string {
+	if v := strings.TrimSpace(n.customization.Runtime.BinaryName); v != "" {
+		return v
+	}
 	return "gaiad"
 }
 
@@ -77,7 +100,7 @@ func (n *CosmosNetwork) BinarySource() network.BinarySource {
 }
 
 func (n *CosmosNetwork) DefaultBinaryVersion() string {
-	return "v18.1.0"
+	return "v25.3.2"
 }
 
 func (n *CosmosNetwork) GetBuildConfig(networkType string) (*network.BuildConfig, error) {
@@ -135,7 +158,10 @@ func (n *CosmosNetwork) DefaultPorts() network.PortConfig {
 // ============================================
 
 func (n *CosmosNetwork) DockerImage() string {
-	return "ghcr.io/cosmos/gaia"
+	if v := strings.TrimSpace(n.customization.Runtime.DockerImage); v != "" {
+		return v
+	}
+	return "ghcr.io/cosmos/gaia:" + n.DefaultBinaryVersion()
 }
 
 func (n *CosmosNetwork) DockerImageTag(version string) string {
@@ -146,6 +172,9 @@ func (n *CosmosNetwork) DockerImageTag(version string) string {
 }
 
 func (n *CosmosNetwork) DockerHomeDir() string {
+	if v := strings.TrimSpace(n.customization.Runtime.DockerHomeDir); v != "" {
+		return v
+	}
 	return "/home/gaia"
 }
 
@@ -154,6 +183,9 @@ func (n *CosmosNetwork) DockerHomeDir() string {
 // ============================================
 
 func (n *CosmosNetwork) DefaultNodeHome() string {
+	if v := strings.TrimSpace(n.customization.Runtime.DefaultHome); v != "" {
+		return v
+	}
 	return "/root/.gaia"
 }
 
@@ -178,13 +210,10 @@ func (n *CosmosNetwork) InitCommand(homeDir, chainID, moniker string) []string {
 }
 
 func (n *CosmosNetwork) StartCommand(homeDir string, networkMode string) []string {
-	args := []string{"start", "--home", homeDir}
-	if networkMode == "mainnet" {
-		args = append(args, "--chain-id", mainnetChainID)
-	} else if networkMode == "testnet" {
-		args = append(args, "--chain-id", testnetChainID)
-	}
-	return args
+	// Disable fastnode migration by default for forked large-state devnets.
+	// This avoids known startup failures during IAVL fastnode upgrade on exported state.
+	// Force pebbledb for large forked-state startup stability (goleveldb+snappy can panic on huge states).
+	return []string{"start", "--home", homeDir, "--iavl-disable-fastnode", "--db_backend=pebbledb"}
 }
 
 func (n *CosmosNetwork) ExportCommand(homeDir string) []string {
@@ -192,12 +221,25 @@ func (n *CosmosNetwork) ExportCommand(homeDir string) []string {
 }
 
 func (n *CosmosNetwork) DefaultGeneratorConfig() network.GeneratorConfig {
+	validatorBalance := strings.TrimSpace(n.customization.Funding.ValidatorBalance)
+	if validatorBalance == "" {
+		validatorBalance = "1000000000000uatom"
+	}
+	accountBalance := strings.TrimSpace(n.customization.Funding.AccountBalance)
+	if accountBalance == "" {
+		accountBalance = "100000000000uatom"
+	}
+	validatorStake := strings.TrimSpace(n.customization.Funding.ValidatorStakeDefault)
+	if validatorStake == "" {
+		validatorStake = "100000000"
+	}
+
 	return network.GeneratorConfig{
 		NumValidators:    4,
 		NumAccounts:      10,
-		AccountBalance:   "100000000000uatom",
-		ValidatorBalance: "1000000000000uatom",
-		ValidatorStake:   "100000000",
+		AccountBalance:   accountBalance,
+		ValidatorBalance: validatorBalance,
+		ValidatorStake:   validatorStake,
 		OutputDir:        "./devnet",
 		ChainID:          "cosmosdevnet-1",
 	}
@@ -208,10 +250,13 @@ func (n *CosmosNetwork) DefaultGeneratorConfig() network.GeneratorConfig {
 // ============================================
 
 func (n *CosmosNetwork) GetCodec() ([]byte, error) {
-	return nil, nil
+	return []byte{}, nil
 }
 
 func (n *CosmosNetwork) Validate() error {
+	if n.initErr != nil {
+		return n.initErr
+	}
 	if n.Name() == "" {
 		return fmt.Errorf("network name is required")
 	}
@@ -226,27 +271,83 @@ func (n *CosmosNetwork) Validate() error {
 // ============================================
 
 func (n *CosmosNetwork) SnapshotURL(networkType string) string {
-	switch networkType {
-	case "mainnet":
-		return mainnetSnapshot
-	case "testnet":
-		return testnetSnapshot
-	default:
+	profile, err := n.requireNetworkProfile(networkType)
+	if err != nil {
 		return ""
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), n.snapshotResolveTimeout)
+	defer cancel()
+
+	profileCfg := NetworkProfileConfig{
+		ChainID:          profile.ChainID,
+		RPCEndpoint:      profile.RPCEndpoint,
+		RESTEndpoint:     profile.RESTEndpoint,
+		SnapshotIndexURL: profile.SnapshotIndexURL,
+	}
+
+	var snapshotURL string
+	if n.hooks.SnapshotURLResolver != nil {
+		snapshotURL, err = n.hooks.SnapshotURLResolver(ctx, canonicalNetworkType(networkType), profileCfg, n.customization)
+	} else {
+		snapshotURL, err = resolveLatestPolkachuSnapshotURL(ctx, canonicalNetworkType(networkType), profileCfg, n.customization.Snapshot)
+	}
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(snapshotURL)
 }
 
 func (n *CosmosNetwork) RPCEndpoint(networkType string) string {
-	switch networkType {
-	case "mainnet":
-		return mainnetRPC
-	case "testnet":
-		return testnetRPC
-	default:
-		return ""
+	if profile, ok := n.networkProfileByType(networkType); ok {
+		return profile.RPCEndpoint
 	}
+	return ""
+}
+
+func (n *CosmosNetwork) SnapshotURLs(networkType string) []string {
+	snapshotURL := n.SnapshotURL(networkType)
+	if snapshotURL == "" {
+		return nil
+	}
+	return []string{snapshotURL}
+}
+
+func (n *CosmosNetwork) RPCEndpoints(networkType string) []string {
+	endpoint := n.RPCEndpoint(networkType)
+	if endpoint == "" {
+		return nil
+	}
+	return []string{endpoint}
 }
 
 func (n *CosmosNetwork) AvailableNetworks() []string {
-	return []string{"mainnet", "testnet"}
+	return availableNetworkTypes(n.profiles)
+}
+
+func availableNetworkTypes(profiles map[string]networkProfile) []string {
+	if len(profiles) == 0 {
+		return []string{networkMainnet, networkTestnet}
+	}
+
+	out := make([]string, 0, len(profiles))
+	if _, ok := profiles[networkMainnet]; ok {
+		out = append(out, networkMainnet)
+	}
+	if _, ok := profiles[networkTestnet]; ok {
+		out = append(out, networkTestnet)
+	}
+
+	extras := make([]string, 0, len(profiles))
+	for key := range profiles {
+		if key == networkMainnet || key == networkTestnet {
+			continue
+		}
+		extras = append(extras, key)
+	}
+	sort.Strings(extras)
+	out = append(out, extras...)
+
+	return out
 }
