@@ -11,7 +11,8 @@ import (
 const (
 	// DefaultGenesisCacheExpiration matches snapshot cache expiration.
 	// This ensures genesis export cache expires at the same time as the snapshot it came from.
-	DefaultGenesisCacheExpiration = 30 * time.Minute
+	// TODO(kangeunchan): Keep temporary 5h TTL aligned with snapshot cache; revisit with configurable policy.
+	DefaultGenesisCacheExpiration = 5 * time.Hour
 )
 
 // GenesisCache represents a cached exported genesis.

@@ -11,9 +11,9 @@ import (
 
 const (
 	// DefaultCacheExpiration is the default duration after which a cached snapshot expires.
-	// Snapshots are large files (1-10GB), so caching for 30 minutes provides a good balance
-	// between avoiding redundant downloads during development and ensuring fresh state.
-	DefaultCacheExpiration = 30 * time.Minute
+	// TODO(kangeunchan): This is temporarily increased to 5h for Cosmos snapshot workflow stability.
+	// Revisit and make cache TTL configurable via runtime config/CLI.
+	DefaultCacheExpiration = 5 * time.Hour
 )
 
 // SnapshotCache represents a downloaded and cached state snapshot.
@@ -33,7 +33,7 @@ type SnapshotCache struct {
 	// Timestamps
 	DownloadedAt time.Time `json:"downloaded_at"`
 
-	// Expiration (24 hours)
+	// Expiration
 	ExpiresAt time.Time `json:"expires_at"`
 }
 

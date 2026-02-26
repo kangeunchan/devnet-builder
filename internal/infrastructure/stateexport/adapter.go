@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
@@ -23,6 +24,12 @@ type Adapter struct {
 	logger    *output.Logger
 	exporter  pkgNetwork.StateExporter      // Optional: network-specific exporter from plugin
 	binaryCmd func(homeDir string) []string // Default export command builder
+}
+
+var dockerExportProbeCache sync.Map
+var stateExportRunCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	return cmd.CombinedOutput()
 }
 
 // NewAdapter creates a new StateExportAdapter.
@@ -109,15 +116,9 @@ func (a *Adapter) ExportFromSnapshot(ctx context.Context, opts ports.StateExport
 	}
 
 	// Step 3: Run export command
-	a.logger.Info("Exporting genesis from snapshot... Running: %s %v", opts.BinaryPath, cmdArgs)
-
-	cmd := exec.CommandContext(ctx, opts.BinaryPath, cmdArgs...)
-	output, err := cmd.CombinedOutput()
+	output, err := a.runExportCommand(ctx, opts, cmdArgs)
 	if err != nil {
-		return nil, &StateExportError{
-			Operation: "export",
-			Message:   fmt.Sprintf("export failed: %v\nOutput: %s", err, string(output)),
-		}
+		return nil, err
 	}
 
 	// Step 4: Extract JSON from output (may have warnings/logs before JSON)
@@ -151,6 +152,196 @@ func (a *Adapter) ExportFromSnapshot(ctx context.Context, opts ports.StateExport
 
 	a.logger.Success("Genesis exported successfully (%d bytes)", len(genesis))
 	return genesis, nil
+}
+
+func (a *Adapter) runExportCommand(ctx context.Context, opts ports.StateExportOptions, cmdArgs []string) ([]byte, error) {
+	if path := strings.TrimSpace(opts.BinaryPath); path != "" {
+		a.logger.Info("Exporting genesis from snapshot... Running: %s %v", path, cmdArgs)
+
+		output, err := stateExportRunCommand(ctx, path, cmdArgs...)
+		if err != nil {
+			return nil, &StateExportError{
+				Operation: "export",
+				Message:   fmt.Sprintf("export failed: %v\nOutput: %s", err, string(output)),
+			}
+		}
+		return output, nil
+	}
+
+	image := strings.TrimSpace(opts.DockerImage)
+	if image == "" {
+		return nil, &StateExportError{
+			Operation: "export",
+			Message:   "no export runtime configured (binary_path and docker_image are both empty)",
+		}
+	}
+
+	containerHome := strings.TrimSpace(opts.DockerHomeDir)
+	if containerHome == "" {
+		containerHome = "/data"
+	}
+
+	binaryName := strings.TrimSpace(opts.BinaryName)
+	if binaryName == "" {
+		binaryName = inferBinaryFromDockerImage(image)
+	}
+	if err := probeDockerExportCommandHelp(ctx, image, binaryName); err != nil {
+		return nil, &StateExportError{
+			Operation: "export_probe",
+			Message:   err.Error(),
+		}
+	}
+
+	uid := os.Getuid()
+	gid := os.Getgid()
+
+	args := []string{
+		"run", "--rm",
+		"--user", fmt.Sprintf("%d:%d", uid, gid),
+		"-e", fmt.Sprintf("HOME=%s", containerHome),
+		"-v", fmt.Sprintf("%s:%s", opts.HomeDir, containerHome),
+		"--entrypoint", binaryName,
+		image,
+	}
+	args = append(args, rewriteHomeDirArgsForDocker(cmdArgs, opts.HomeDir, containerHome)...)
+
+	a.logger.Info("Exporting genesis from snapshot... Running: docker %v", args)
+
+	output, err := stateExportRunCommand(ctx, "docker", args...)
+	if err != nil {
+		return nil, &StateExportError{
+			Operation: "export",
+			Message:   fmt.Sprintf("docker export failed: %v\nOutput: %s", err, string(output)),
+		}
+	}
+
+	return output, nil
+}
+
+type dockerExportProbeResult struct {
+	err error
+}
+
+func probeDockerExportCommandHelp(ctx context.Context, image, entrypoint string) error {
+	key := strings.TrimSpace(image) + "|" + strings.TrimSpace(entrypoint)
+	if cached, ok := dockerExportProbeCache.Load(key); ok {
+		return cached.(*dockerExportProbeResult).err
+	}
+
+	probeErr := runDockerExportHelpProbe(ctx, image, entrypoint)
+	entry := &dockerExportProbeResult{err: probeErr}
+	actual, loaded := dockerExportProbeCache.LoadOrStore(key, entry)
+	if loaded {
+		return actual.(*dockerExportProbeResult).err
+	}
+	return entry.err
+}
+
+func runDockerExportHelpProbe(ctx context.Context, image, entrypoint string) error {
+	probeCtx := ctx
+	cancel := func() {}
+	if ctx == nil {
+		probeCtx, cancel = context.WithTimeout(context.Background(), 20*time.Second)
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		probeCtx, cancel = context.WithTimeout(ctx, 20*time.Second)
+	}
+	defer cancel()
+
+	args := []string{"run", "--rm"}
+	if strings.TrimSpace(entrypoint) != "" {
+		args = append(args, "--entrypoint", entrypoint)
+	}
+	args = append(args, image, "export", "--help")
+
+	output, err := stateExportRunCommand(probeCtx, "docker", args...)
+	if err != nil {
+		return fmt.Errorf(
+			"docker export compatibility check failed (image=%s entrypoint=%s command=export --help): %w\noutput: %s",
+			image,
+			entrypoint,
+			err,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	return nil
+}
+
+func rewriteHomeDirArgsForDocker(args []string, hostHome, containerHome string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+
+	rewritten := make([]string, len(args))
+	copy(rewritten, args)
+
+	hostHome = filepath.Clean(strings.TrimSpace(hostHome))
+	containerHome = strings.TrimSpace(containerHome)
+	if hostHome == "" || containerHome == "" {
+		return rewritten
+	}
+
+	for idx := 0; idx < len(rewritten); idx++ {
+		switch {
+		case rewritten[idx] == "--home":
+			if idx+1 < len(rewritten) {
+				rewritten[idx+1] = rewriteHomePathValue(rewritten[idx+1], hostHome, containerHome)
+				idx++
+			}
+		case strings.HasPrefix(rewritten[idx], "--home="):
+			value := strings.TrimPrefix(rewritten[idx], "--home=")
+			rewritten[idx] = "--home=" + rewriteHomePathValue(value, hostHome, containerHome)
+		}
+	}
+
+	return rewritten
+}
+
+func rewriteHomePathValue(rawValue, hostHome, containerHome string) string {
+	candidate := strings.TrimSpace(rawValue)
+	if candidate == "" || !filepath.IsAbs(candidate) {
+		return rawValue
+	}
+
+	cleaned := filepath.Clean(candidate)
+	if cleaned == hostHome {
+		return containerHome
+	}
+
+	rel, err := filepath.Rel(hostHome, cleaned)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return rawValue
+	}
+
+	return filepath.Join(containerHome, rel)
+}
+
+func inferBinaryFromDockerImage(image string) string {
+	ref := strings.TrimSpace(image)
+	if ref == "" {
+		return "stabled"
+	}
+
+	if digestIdx := strings.Index(ref, "@"); digestIdx >= 0 {
+		ref = ref[:digestIdx]
+	}
+
+	lastSlash := strings.LastIndex(ref, "/")
+	lastColon := strings.LastIndex(ref, ":")
+	if lastColon > lastSlash {
+		ref = ref[:lastColon]
+	}
+
+	name := ref
+	if lastSlash >= 0 {
+		name = ref[lastSlash+1:]
+	}
+	if name == "" {
+		return "stabled"
+	}
+	if strings.HasSuffix(name, "d") {
+		return name
+	}
+	return name + "d"
 }
 
 // PrepareForExport prepares the node home directory for export.

@@ -1,6 +1,7 @@
 package nodeconfig
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -17,70 +18,161 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/types"
 )
 
-// isGHCRImage returns true if the image is from GitHub Container Registry.
-// GHCR images have stabled as entrypoint, so we don't need to prefix commands.
-func isGHCRImage(image string) bool {
-	return strings.HasPrefix(image, "ghcr.io/")
+const (
+	defaultFallbackBinary   = "stabled"
+	defaultContainerHomeDir = "/data"
+)
+
+// NodeInitializerConfig controls NodeInitializer command/runtime behavior.
+type NodeInitializerConfig struct {
+	Mode          types.ExecutionMode
+	DockerImage   string
+	BinaryPath    string
+	BinaryName    string
+	DockerHomeDir string
+	Logger        *output.Logger
 }
 
-// NodeInitializer handles node initialization with stabled.
+// NodeInitializer handles node initialization with the configured chain binary.
 type NodeInitializer struct {
-	mode        types.ExecutionMode
-	dockerImage string
-	binaryPath  string // Path to local stabled binary (used for local mode)
-	logger      *output.Logger
+	mode          types.ExecutionMode
+	dockerImage   string
+	binaryPath    string // Path to local network binary (used for local mode)
+	binaryName    string // Binary command name when path is not explicitly configured
+	dockerHomeDir string // Home directory inside docker containers
+	logger        *output.Logger
 }
 
 // NewNodeInitializer creates a new NodeInitializer.
 func NewNodeInitializer(mode types.ExecutionMode, dockerImage string, logger *output.Logger) *NodeInitializer {
-	if logger == nil {
-		logger = output.DefaultLogger
-	}
-	return &NodeInitializer{
-		mode:        mode,
-		dockerImage: dockerImage,
-		logger:      logger,
-	}
+	return NewNodeInitializerWithConfig(NodeInitializerConfig{
+		Mode:        mode,
+		DockerImage: dockerImage,
+		Logger:      logger,
+	})
 }
 
 // NewNodeInitializerWithBinary creates a new NodeInitializer with a specific binary path.
-// For local mode, this should be the managed binary at ~/.devnet-builder/bin/stabled.
+// For local mode, this should be the managed binary at ~/.devnet-builder/bin/{binaryName}.
 func NewNodeInitializerWithBinary(mode types.ExecutionMode, dockerImage, binaryPath string, logger *output.Logger) *NodeInitializer {
+	return NewNodeInitializerWithConfig(NodeInitializerConfig{
+		Mode:        mode,
+		DockerImage: dockerImage,
+		BinaryPath:  binaryPath,
+		Logger:      logger,
+	})
+}
+
+// NewNodeInitializerWithConfig creates a new NodeInitializer from explicit configuration.
+func NewNodeInitializerWithConfig(cfg NodeInitializerConfig) *NodeInitializer {
+	logger := cfg.Logger
 	if logger == nil {
 		logger = output.DefaultLogger
 	}
+
+	binaryPath := strings.TrimSpace(cfg.BinaryPath)
+	binaryName := strings.TrimSpace(cfg.BinaryName)
+	if binaryName == "" {
+		base := filepath.Base(binaryPath)
+		if base != "" && base != "." && base != string(os.PathSeparator) {
+			binaryName = base
+		}
+	}
+
+	dockerHomeDir := strings.TrimSpace(cfg.DockerHomeDir)
+	if dockerHomeDir == "" {
+		dockerHomeDir = defaultContainerHomeDir
+	}
+
 	return &NodeInitializer{
-		mode:        mode,
-		dockerImage: dockerImage,
-		binaryPath:  binaryPath,
-		logger:      logger,
+		mode:          cfg.Mode,
+		dockerImage:   strings.TrimSpace(cfg.DockerImage),
+		binaryPath:    binaryPath,
+		binaryName:    binaryName,
+		dockerHomeDir: dockerHomeDir,
+		logger:        logger,
 	}
 }
 
-// Initialize runs `stabled init` for a node.
-// Note: Always uses local stabled binary for init because Docker images
-// may have issues with init command requiring pre-existing config files.
+func (i *NodeInitializer) localBinaryPath() string {
+	if path := strings.TrimSpace(i.binaryPath); path != "" {
+		return path
+	}
+	if name := strings.TrimSpace(i.binaryName); name != "" {
+		return name
+	}
+	return defaultFallbackBinary
+}
+
+func (i *NodeInitializer) localBinaryAvailable() bool {
+	path := strings.TrimSpace(i.localBinaryPath())
+	if path == "" {
+		return false
+	}
+
+	if strings.Contains(path, string(os.PathSeparator)) || filepath.IsAbs(path) {
+		_, err := os.Stat(path)
+		return err == nil
+	}
+
+	_, err := exec.LookPath(path)
+	return err == nil
+}
+
+func (i *NodeInitializer) containerHomeDir() string {
+	if home := strings.TrimSpace(i.dockerHomeDir); home != "" {
+		return home
+	}
+	return defaultContainerHomeDir
+}
+
+func (i *NodeInitializer) containerBinary() string {
+	if name := strings.TrimSpace(i.binaryName); name != "" {
+		return name
+	}
+
+	path := strings.TrimSpace(i.binaryPath)
+	base := filepath.Base(path)
+	if base != "" && base != "." && base != string(os.PathSeparator) {
+		return base
+	}
+	return defaultFallbackBinary
+}
+
+func (i *NodeInitializer) dockerBaseArgs(hostPath string) []string {
+	containerHome := i.containerHomeDir()
+	return []string{
+		"run", "--rm",
+		"--user", dockerUserID(),
+		"-e", fmt.Sprintf("HOME=%s", containerHome),
+		"-v", fmt.Sprintf("%s:%s", hostPath, containerHome),
+		"--entrypoint", i.containerBinary(),
+		i.dockerImage,
+	}
+}
+
+func dockerUserID() string {
+	return fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+}
+
+// Initialize runs chain `init` for a node.
 func (i *NodeInitializer) Initialize(ctx context.Context, nodeDir, moniker, chainID string) error {
 	i.logger.Debug("Initializing node %s at %s", moniker, nodeDir)
 
-	// Always use local init - Docker GHCR images have issues with init command
-	// that expects client.toml to already exist
+	if i.mode == types.ExecutionModeDocker && !i.localBinaryAvailable() {
+		return i.initDocker(ctx, nodeDir, moniker, chainID)
+	}
+
 	return i.initLocal(ctx, nodeDir, moniker, chainID)
 }
 
 func (i *NodeInitializer) initDocker(ctx context.Context, nodeDir, moniker, chainID string) error {
-	args := []string{
-		"run", "--rm",
-		"-v", fmt.Sprintf("%s:/root/.stabled", nodeDir),
-		i.dockerImage,
-	}
-	// GHCR images have stabled as entrypoint, others need explicit command
-	if !isGHCRImage(i.dockerImage) {
-		args = append(args, "stabled")
-	}
+	args := i.dockerBaseArgs(nodeDir)
+	containerHome := i.containerHomeDir()
 	args = append(args, "init", moniker,
 		"--chain-id", chainID,
-		"--home", "/root/.stabled",
+		"--home", containerHome,
+		"--overwrite",
 	)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -101,11 +193,7 @@ func (i *NodeInitializer) initDocker(ctx context.Context, nodeDir, moniker, chai
 }
 
 func (i *NodeInitializer) initLocal(ctx context.Context, nodeDir, moniker, chainID string) error {
-	// Determine binary path - use managed binary if set, otherwise fallback to PATH lookup
-	binaryPath := i.binaryPath
-	if binaryPath == "" {
-		binaryPath = "stabled" // Fallback for backward compatibility
-	}
+	binaryPath := i.localBinaryPath()
 
 	// Use --overwrite to handle existing genesis.json files
 	args := []string{"init", moniker, "--chain-id", chainID, "--home", nodeDir, "--overwrite"}
@@ -121,7 +209,7 @@ func (i *NodeInitializer) initLocal(ctx context.Context, nodeDir, moniker, chain
 			ExitCode: getExitCode(err),
 			Error:    err,
 		})
-		return fmt.Errorf("stabled init failed: %w", err)
+		return fmt.Errorf("%s init failed: %w", filepath.Base(binaryPath), err)
 	}
 
 	// Fix permissions for Docker compatibility
@@ -221,34 +309,44 @@ func (i *NodeInitializer) Export(ctx context.Context, nodeDir, destPath string) 
 }
 
 func (i *NodeInitializer) exportDocker(ctx context.Context, nodeDir, destPath string) error {
-	args := []string{
-		"run", "--rm",
-		"-v", fmt.Sprintf("%s:/root/.stabled", nodeDir),
-		"-v", fmt.Sprintf("%s:/output", destPath),
-	}
-	// GHCR images have stabled as entrypoint, need to override it for bash
-	if isGHCRImage(i.dockerImage) {
-		args = append(args, "--entrypoint", "bash", i.dockerImage, "-c",
-			"stabled export --home /root/.stabled > /output/genesis.json")
-	} else {
-		args = append(args, i.dockerImage, "bash", "-c",
-			"stabled export --home /root/.stabled > /output/genesis.json")
+	args := i.dockerBaseArgs(nodeDir)
+	containerHome := i.containerHomeDir()
+
+	args = append(args, "export", "--home", containerHome)
+
+	outFile, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to create export output file: %w", err)
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker export failed: %s: %w", string(output), err)
+	cmd.Stdout = outFile
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		_ = outFile.Close()
+		_ = os.Remove(destPath)
+		return fmt.Errorf("docker export failed: %s: %w", strings.TrimSpace(stderr.String()), err)
 	}
+
+	if err := outFile.Close(); err != nil {
+		_ = os.Remove(destPath)
+		return fmt.Errorf("failed to close export output file: %w", err)
+	}
+
+	info, err := os.Stat(destPath)
+	if err != nil || info.Size() == 0 {
+		_ = os.Remove(destPath)
+		return fmt.Errorf("exported genesis is empty or missing")
+	}
+
 	return nil
 }
 
 func (i *NodeInitializer) exportLocal(ctx context.Context, nodeDir, destPath string) error {
-	// Determine binary path - use managed binary if set, otherwise fallback to PATH lookup
-	binaryPath := i.binaryPath
-	if binaryPath == "" {
-		binaryPath = "stabled" // Fallback for backward compatibility
-	}
+	binaryPath := i.localBinaryPath()
 
 	// Use %q for proper shell quoting to handle paths with spaces or special characters
 	cmd := exec.CommandContext(ctx, "bash", "-c",
@@ -256,7 +354,7 @@ func (i *NodeInitializer) exportLocal(ctx context.Context, nodeDir, destPath str
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("stabled export failed: %s: %w", string(output), err)
+		return fmt.Errorf("%s export failed: %s: %w", filepath.Base(binaryPath), string(output), err)
 	}
 	return nil
 }
@@ -305,11 +403,11 @@ func (i *NodeInitializer) CreateAccountKey(ctx context.Context, keyringDir, keyN
 		return nil, fmt.Errorf("failed to create keyring directory: %w", err)
 	}
 
-	// Determine binary path
-	binaryPath := i.binaryPath
-	if binaryPath == "" {
-		binaryPath = "stabled"
+	if i.mode == types.ExecutionModeDocker && !i.localBinaryAvailable() {
+		return i.createAccountKeyDocker(ctx, keyringDir, keyName)
 	}
+
+	binaryPath := i.localBinaryPath()
 
 	// Delete existing key first to avoid interactive prompt (EOF error)
 	// The prompt "override the existing name X [y/N]:" causes EOF when stdin is closed
@@ -362,10 +460,11 @@ func (i *NodeInitializer) CreateAccountKey(ctx context.Context, keyringDir, keyN
 
 // GetAccountKey retrieves information about an existing account key.
 func (i *NodeInitializer) GetAccountKey(ctx context.Context, keyringDir, keyName string) (*ports.AccountKeyInfo, error) {
-	binaryPath := i.binaryPath
-	if binaryPath == "" {
-		binaryPath = "stabled"
+	if i.mode == types.ExecutionModeDocker && !i.localBinaryAvailable() {
+		return i.getAccountKeyDocker(ctx, keyringDir, keyName)
 	}
+
+	binaryPath := i.localBinaryPath()
 
 	args := []string{
 		"keys", "show", keyName,
@@ -385,6 +484,129 @@ func (i *NodeInitializer) GetAccountKey(ctx context.Context, keyringDir, keyName
 		return nil, fmt.Errorf("failed to parse key info: %w", err)
 	}
 
+	return &result, nil
+}
+
+func (i *NodeInitializer) runDockerKeyCommand(ctx context.Context, keyringDir string, command []string, stdin string) ([]byte, error) {
+	if strings.TrimSpace(i.dockerImage) == "" {
+		return nil, fmt.Errorf("docker image is required for docker key operations")
+	}
+
+	args := i.dockerBaseArgs(keyringDir)
+	if strings.TrimSpace(stdin) != "" {
+		args = withDockerStdinAttached(args)
+	}
+	args = append(args, command...)
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("docker command failed: %s: %w", string(output), err)
+	}
+	return output, nil
+}
+
+func withDockerStdinAttached(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+
+	imageIdx := len(args) - 1
+	out := make([]string, 0, len(args)+1)
+	out = append(out, args[:imageIdx]...)
+	out = append(out, "-i")
+	out = append(out, args[imageIdx:]...)
+	return out
+}
+
+func (i *NodeInitializer) createAccountKeyDocker(ctx context.Context, keyringDir, keyName string) (*ports.AccountKeyInfo, error) {
+	containerHome := i.containerHomeDir()
+
+	deleteCmd := []string{
+		"keys", "delete", keyName,
+		"--keyring-backend", "test",
+		"--home", containerHome,
+		"-y",
+	}
+	_, _ = i.runDockerKeyCommand(ctx, keyringDir, deleteCmd, "")
+
+	addCmd := []string{
+		"keys", "add", keyName,
+		"--keyring-backend", "test",
+		"--home", containerHome,
+		"--output", "json",
+	}
+	output, err := i.runDockerKeyCommand(ctx, keyringDir, addCmd, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create account key via docker: %w", err)
+	}
+
+	var result ports.AccountKeyInfo
+	if err := json.Unmarshal(output, &result); err != nil {
+		return i.getAccountKeyDocker(ctx, keyringDir, keyName)
+	}
+	return &result, nil
+}
+
+func (i *NodeInitializer) getAccountKeyDocker(ctx context.Context, keyringDir, keyName string) (*ports.AccountKeyInfo, error) {
+	containerHome := i.containerHomeDir()
+	showCmd := []string{
+		"keys", "show", keyName,
+		"--keyring-backend", "test",
+		"--home", containerHome,
+		"--output", "json",
+	}
+
+	output, err := i.runDockerKeyCommand(ctx, keyringDir, showCmd, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get account key via docker: %w", err)
+	}
+
+	var result ports.AccountKeyInfo
+	if err := json.Unmarshal(output, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse docker key info: %w", err)
+	}
+	return &result, nil
+}
+
+func (i *NodeInitializer) createAccountKeyFromMnemonicDocker(ctx context.Context, keyringDir, keyName, mnemonic string) (*ports.AccountKeyInfo, error) {
+	containerHome := i.containerHomeDir()
+
+	deleteCmd := []string{
+		"keys", "delete", keyName,
+		"--keyring-backend", "test",
+		"--home", containerHome,
+		"-y",
+	}
+	_, _ = i.runDockerKeyCommand(ctx, keyringDir, deleteCmd, "")
+
+	addCmd := []string{
+		"keys", "add", keyName,
+		"--keyring-backend", "test",
+		"--home", containerHome,
+		"--recover",
+		"--output", "json",
+	}
+	output, err := i.runDockerKeyCommand(ctx, keyringDir, addCmd, mnemonic+"\n")
+	if err != nil {
+		return nil, fmt.Errorf("failed to recover account key via docker: %w", err)
+	}
+
+	var result ports.AccountKeyInfo
+	if err := json.Unmarshal(output, &result); err != nil {
+		keyInfo, getErr := i.getAccountKeyDocker(ctx, keyringDir, keyName)
+		if getErr != nil {
+			return nil, fmt.Errorf("failed to parse recovered key info: %w", err)
+		}
+		keyInfo.Mnemonic = mnemonic
+		return keyInfo, nil
+	}
+
+	result.Mnemonic = mnemonic
 	return &result, nil
 }
 
@@ -436,11 +658,11 @@ func (i *NodeInitializer) CreateAccountKeyFromMnemonic(ctx context.Context, keyr
 		return nil, fmt.Errorf("failed to create keyring directory: %w", err)
 	}
 
-	// Determine binary path
-	binaryPath := i.binaryPath
-	if binaryPath == "" {
-		binaryPath = "stabled"
+	if i.mode == types.ExecutionModeDocker && !i.localBinaryAvailable() {
+		return i.createAccountKeyFromMnemonicDocker(ctx, keyringDir, keyName, mnemonic)
 	}
+
+	binaryPath := i.localBinaryPath()
 
 	// Delete existing key first to avoid interactive prompt
 	deleteArgs := []string{
