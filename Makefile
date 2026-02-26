@@ -50,9 +50,9 @@ build: $(BUILDDIR)/
 	@echo "  Build date: $(BUILD_DATE)"
 	@echo "  Networks:   plugin-only"
 	@go build -ldflags "$(LDFLAGS)" -o $(BUILDDIR)/$(BINARY_NAME) ./cmd/devnet-builder
-	@go install -ldflags "$(LDFLAGS)" -o $(BUILDDIR)/$(BINARY_NAME) ./cmd/devnetd
-	@go install -ldflags "$(LDFLAGS)" -o $(BUILDDIR)/$(BINARY_NAME) ./cmd/dvb
-	@echo "Build successful: $(BUILDDIR)/$(BINARY_NAME)"
+	@go build -ldflags "$(LDFLAGS)" -o $(BUILDDIR)/devnetd ./cmd/devnetd
+	@go build -ldflags "$(LDFLAGS)" -o $(BUILDDIR)/dvb ./cmd/dvb
+	@echo "Build successful: $(BUILDDIR)/devnet-builder, $(BUILDDIR)/devnetd, $(BUILDDIR)/dvb"
 
 
 # Install to GOPATH/bin (plugin-only mode)
