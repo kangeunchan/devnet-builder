@@ -3,18 +3,29 @@ package genesis
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	"github.com/altuslabsxyz/devnet-builder/internal/output"
+)
+
+const (
+	genesisRPCRequestTimeout = 5 * time.Minute
+	genesisRPCMaxAttempts    = 3
+	genesisRPCRetryDelay     = 400 * time.Millisecond
 )
 
 // FetcherAdapter implements ports.GenesisFetcher.
@@ -25,6 +36,28 @@ type FetcherAdapter struct {
 	useDocker   bool
 	logger      *output.Logger
 }
+
+var (
+	genesisRPCHTTPClient = &http.Client{
+		Timeout: genesisRPCRequestTimeout,
+	}
+	genesisRPCHTTP1Client = &http.Client{
+		Timeout: genesisRPCRequestTimeout,
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     false,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		},
+	}
+)
 
 // NewFetcherAdapter creates a new FetcherAdapter.
 func NewFetcherAdapter(homeDir, binaryPath, dockerImage string, useDocker bool, logger *output.Logger) *FetcherAdapter {
@@ -196,35 +229,37 @@ func (f *FetcherAdapter) FetchFromRPC(ctx context.Context, endpoint string) ([]b
 
 // fetchGenesisFromRPC fetches genesis from an RPC endpoint and saves to destPath.
 func (f *FetcherAdapter) fetchGenesisFromRPC(ctx context.Context, rpcEndpoint, destPath string) error {
+	genesis, directErr := f.fetchGenesisDirect(ctx, rpcEndpoint)
+	if directErr != nil {
+		f.logger.Debug("Direct /genesis fetch failed (%v), trying /genesis_chunked fallback", directErr)
+		chunkedGenesis, chunkedErr := f.fetchGenesisChunked(ctx, rpcEndpoint)
+		if chunkedErr != nil {
+			return fmt.Errorf("direct /genesis failed: %w; /genesis_chunked fallback failed: %v", directErr, chunkedErr)
+		}
+		genesis = chunkedGenesis
+	}
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Write genesis file
+	if err := os.WriteFile(destPath, genesis, 0o644); err != nil {
+		return fmt.Errorf("failed to write genesis file: %w", err)
+	}
+
+	return nil
+}
+
+func (f *FetcherAdapter) fetchGenesisDirect(ctx context.Context, rpcEndpoint string) ([]byte, error) {
 	// Construct genesis endpoint URL
 	genesisURL := strings.TrimSuffix(rpcEndpoint, "/") + "/genesis"
-
 	f.logger.Debug("Fetching genesis from %s", genesisURL)
 
-	// Create HTTP client
-	client := &http.Client{
-		Timeout: 5 * time.Minute,
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, genesisURL, nil)
+	body, err := f.fetchRPCBody(ctx, genesisURL)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to fetch genesis: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to fetch genesis: status %d", resp.StatusCode)
-	}
-
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read genesis response: %w", err)
+		return nil, err
 	}
 
 	// Parse the RPC response
@@ -233,22 +268,250 @@ func (f *FetcherAdapter) fetchGenesisFromRPC(ctx context.Context, rpcEndpoint, d
 			Genesis json.RawMessage `json:"genesis"`
 		} `json:"result"`
 	}
-
 	if err := json.Unmarshal(body, &rpcResponse); err != nil {
-		return fmt.Errorf("failed to parse RPC response: %w", err)
+		return nil, fmt.Errorf("failed to parse RPC response: %w", err)
+	}
+	if len(rpcResponse.Result.Genesis) == 0 {
+		return nil, fmt.Errorf("genesis response is empty")
+	}
+	return rpcResponse.Result.Genesis, nil
+}
+
+type genesisChunkResponse struct {
+	Result struct {
+		Chunk json.RawMessage `json:"chunk"`
+		Total json.RawMessage `json:"total"`
+		Data  string          `json:"data"`
+	} `json:"result"`
+}
+
+type genesisChunk struct {
+	Chunk int
+	Total int
+	Data  string
+}
+
+func (f *FetcherAdapter) fetchGenesisChunked(ctx context.Context, rpcEndpoint string) ([]byte, error) {
+	// Fetch chunk 0 first to determine total count.
+	first, err := f.fetchGenesisChunk(ctx, rpcEndpoint, 0)
+	if err != nil {
+		return nil, err
+	}
+	if first.Total <= 0 {
+		return nil, fmt.Errorf("invalid genesis_chunked total: %d", first.Total)
 	}
 
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
+	decodedFirst, err := base64.StdEncoding.DecodeString(first.Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode chunk 0: %w", err)
 	}
 
-	// Write genesis file
-	if err := os.WriteFile(destPath, rpcResponse.Result.Genesis, 0644); err != nil {
-		return fmt.Errorf("failed to write genesis file: %w", err)
+	combined := make([]byte, 0, len(decodedFirst)*first.Total)
+	combined = append(combined, decodedFirst...)
+
+	for chunk := 1; chunk < first.Total; chunk++ {
+		resp, err := f.fetchGenesisChunk(ctx, rpcEndpoint, chunk)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Total != first.Total {
+			return nil, fmt.Errorf("chunk %d total mismatch: got %d, expected %d", chunk, resp.Total, first.Total)
+		}
+		if resp.Chunk != chunk {
+			return nil, fmt.Errorf("chunk index mismatch: got %d, expected %d", resp.Chunk, chunk)
+		}
+
+		decoded, err := base64.StdEncoding.DecodeString(resp.Data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode chunk %d: %w", chunk, err)
+		}
+		combined = append(combined, decoded...)
 	}
 
-	return nil
+	// Validate assembled genesis is valid JSON and appears to be a genesis object.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(combined, &probe); err != nil {
+		return nil, fmt.Errorf("combined genesis_chunked payload is not valid JSON: %w", err)
+	}
+	if _, hasChainID := probe["chain_id"]; !hasChainID {
+		if _, hasAppState := probe["app_state"]; !hasAppState {
+			return nil, fmt.Errorf("combined genesis_chunked payload missing chain_id/app_state")
+		}
+	}
+
+	return combined, nil
+}
+
+func (f *FetcherAdapter) fetchGenesisChunk(ctx context.Context, rpcEndpoint string, chunk int) (*genesisChunk, error) {
+	chunkURL := fmt.Sprintf("%s/genesis_chunked?chunk=%d", strings.TrimSuffix(rpcEndpoint, "/"), chunk)
+	f.logger.Debug("Fetching genesis chunk %d from %s", chunk, chunkURL)
+
+	body, err := f.fetchRPCBody(ctx, chunkURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp genesisChunkResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse genesis_chunked response: %w", err)
+	}
+	if strings.TrimSpace(resp.Result.Data) == "" {
+		return nil, fmt.Errorf("genesis_chunked response is empty for chunk %d", chunk)
+	}
+
+	parsedChunk, err := parseChunkedIndex(resp.Result.Chunk, "chunk")
+	if err != nil {
+		return nil, fmt.Errorf("invalid genesis_chunked chunk field: %w", err)
+	}
+	parsedTotal, err := parseChunkedIndex(resp.Result.Total, "total")
+	if err != nil {
+		return nil, fmt.Errorf("invalid genesis_chunked total field: %w", err)
+	}
+
+	return &genesisChunk{
+		Chunk: parsedChunk,
+		Total: parsedTotal,
+		Data:  resp.Result.Data,
+	}, nil
+}
+
+func parseChunkedIndex(raw json.RawMessage, field string) (int, error) {
+	if len(raw) == 0 {
+		return 0, fmt.Errorf("%s is missing", field)
+	}
+
+	var intValue int
+	if err := json.Unmarshal(raw, &intValue); err == nil {
+		return intValue, nil
+	}
+
+	var stringValue string
+	if err := json.Unmarshal(raw, &stringValue); err != nil {
+		return 0, fmt.Errorf("%s is neither integer nor string", field)
+	}
+
+	stringValue = strings.TrimSpace(stringValue)
+	if stringValue == "" {
+		return 0, fmt.Errorf("%s is empty", field)
+	}
+
+	parsedValue, err := strconv.Atoi(stringValue)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not numeric: %w", field, err)
+	}
+	return parsedValue, nil
+}
+
+type rpcStatusError struct {
+	URL    string
+	Status int
+}
+
+func (e *rpcStatusError) Error() string {
+	return fmt.Sprintf("failed to fetch genesis: status %d", e.Status)
+}
+
+func (f *FetcherAdapter) fetchRPCBody(ctx context.Context, url string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= genesisRPCMaxAttempts; attempt++ {
+		client := genesisRPCHTTPClient
+		if attempt > 1 {
+			client = genesisRPCHTTP1Client
+		}
+
+		body, err := f.fetchRPCBodyOnce(ctx, url, client)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+
+		if !isRetryableGenesisFetchError(err) || attempt == genesisRPCMaxAttempts {
+			return nil, err
+		}
+
+		if f.logger != nil {
+			f.logger.Debug(
+				"Retrying genesis fetch (%d/%d) for %s after error: %v",
+				attempt+1,
+				genesisRPCMaxAttempts,
+				url,
+				err,
+			)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(genesisRPCRetryDelay):
+		}
+	}
+
+	return nil, lastErr
+}
+
+func (f *FetcherAdapter) fetchRPCBodyOnce(ctx context.Context, url string, client *http.Client) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch genesis: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, &rpcStatusError{
+			URL:    url,
+			Status: resp.StatusCode,
+		}
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read genesis response: %w", err)
+	}
+
+	return body, nil
+}
+
+func isRetryableGenesisFetchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var statusErr *rpcStatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.Status {
+		case http.StatusTooManyRequests, http.StatusRequestTimeout:
+			return true
+		default:
+			return statusErr.Status >= http.StatusInternalServerError
+		}
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "stream error") ||
+		strings.Contains(msg, "http2") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "unexpected eof") {
+		return true
+	}
+
+	return false
 }
 
 // ModifyGenesis applies modifications to a genesis file.
