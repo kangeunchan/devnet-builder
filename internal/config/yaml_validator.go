@@ -47,8 +47,8 @@ type YAMLValidator struct {
 // NewYAMLValidator creates a new validator with default settings
 func NewYAMLValidator() *YAMLValidator {
 	return &YAMLValidator{
-		MaxValidators: 4,
-		MinValidators: 1,
+		MaxValidators: ValidatorCountMaxLocal,
+		MinValidators: ValidatorCountMin,
 		MaxFullNodes:  10,
 		ValidModes:    []string{"docker", "local"},
 	}
@@ -104,25 +104,8 @@ func (v *YAMLValidator) Validate(devnet *YAMLDevnet) *ValidationResult {
 		})
 	}
 
-	// Validate spec.validators
-	if devnet.Spec.Validators < v.MinValidators || devnet.Spec.Validators > v.MaxValidators {
-		result.Valid = false
-		result.Errors = append(result.Errors, ValidationError{
-			Field:   "spec.validators",
-			Message: fmt.Sprintf("must be between %d and %d, got %d", v.MinValidators, v.MaxValidators, devnet.Spec.Validators),
-		})
-	}
-
-	// Validate spec.fullNodes
-	if devnet.Spec.FullNodes < 0 || devnet.Spec.FullNodes > v.MaxFullNodes {
-		result.Valid = false
-		result.Errors = append(result.Errors, ValidationError{
-			Field:   "spec.fullNodes",
-			Message: fmt.Sprintf("must be between 0 and %d, got %d", v.MaxFullNodes, devnet.Spec.FullNodes),
-		})
-	}
-
 	// Validate spec.mode if provided
+	modeValid := true
 	if devnet.Spec.Mode != "" {
 		validMode := false
 		for _, mode := range v.ValidModes {
@@ -133,11 +116,32 @@ func (v *YAMLValidator) Validate(devnet *YAMLDevnet) *ValidationResult {
 		}
 		if !validMode {
 			result.Valid = false
+			modeValid = false
 			result.Errors = append(result.Errors, ValidationError{
 				Field:   "spec.mode",
 				Message: fmt.Sprintf("must be 'docker' or 'local', got %q", devnet.Spec.Mode),
 			})
 		}
+	}
+
+	// Validate spec.validators using shared mode-aware constraints.
+	if modeValid {
+		if err := ValidateValidatorCount(devnet.Spec.Mode, devnet.Spec.Validators); err != nil {
+			result.Valid = false
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "spec.validators",
+				Message: err.Error(),
+			})
+		}
+	}
+
+	// Validate spec.fullNodes
+	if devnet.Spec.FullNodes < 0 || devnet.Spec.FullNodes > v.MaxFullNodes {
+		result.Valid = false
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "spec.fullNodes",
+			Message: fmt.Sprintf("must be between 0 and %d, got %d", v.MaxFullNodes, devnet.Spec.FullNodes),
+		})
 	}
 
 	// Validate spec.networkType if provided

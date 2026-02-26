@@ -21,14 +21,14 @@ func (c *EffectiveConfig) Validate() error {
 		}
 	}
 
-	// Validate validators
-	if c.Validators.Value < 1 || c.Validators.Value > 4 {
-		return fmt.Errorf("invalid validators: %d (must be 1-4)", c.Validators.Value)
-	}
-
 	// Validate mode using canonical type validation
 	if !types.ExecutionMode(c.Mode.Value).IsValid() {
 		return fmt.Errorf("invalid mode: %s (must be 'docker' or 'local')", c.Mode.Value)
+	}
+
+	// Validate validators with mode-aware constraints.
+	if err := ValidateValidatorCount(c.Mode.Value, c.Validators.Value); err != nil {
+		return err
 	}
 
 	// Validate accounts
@@ -56,17 +56,21 @@ func ValidateFileConfig(cfg *FileConfig) error {
 	// Note: BlockchainNetwork validation is deferred until modules are registered.
 	// This allows config loading to happen before network module init() calls.
 
-	// Validate validators if set
-	if cfg.Validators != nil {
-		if *cfg.Validators < 1 || *cfg.Validators > 4 {
-			return fmt.Errorf("invalid validators in config file: %d (must be 1-4)", *cfg.Validators)
-		}
-	}
-
 	// Validate mode if set using canonical type validation
 	if cfg.ExecutionMode != nil {
 		if !types.ExecutionMode(*cfg.ExecutionMode).IsValid() {
 			return fmt.Errorf("invalid mode in config file: %s (must be 'docker' or 'local')", *cfg.ExecutionMode)
+		}
+	}
+
+	// Validate validators if set using mode-aware constraints.
+	if cfg.Validators != nil {
+		mode := ""
+		if cfg.ExecutionMode != nil {
+			mode = string(*cfg.ExecutionMode)
+		}
+		if err := ValidateValidatorCount(mode, *cfg.Validators); err != nil {
+			return err
 		}
 	}
 

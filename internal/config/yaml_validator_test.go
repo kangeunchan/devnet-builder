@@ -124,6 +124,7 @@ func TestYAMLValidator_Validate_InvalidValidatorsCount(t *testing.T) {
 		Metadata:   YAMLMetadata{Name: "test"},
 		Spec: YAMLDevnetSpec{
 			Network:    "stable",
+			Mode:       "local",
 			Validators: 10, // exceeds max of 4
 		},
 	}
@@ -135,13 +136,13 @@ func TestYAMLValidator_Validate_InvalidValidatorsCount(t *testing.T) {
 	}
 	foundError := false
 	for _, err := range result.Errors {
-		if err.Field == "spec.validators" && strings.Contains(err.Message, "between 1 and 4") {
+		if err.Field == "spec.validators" && strings.Contains(err.Message, "1-4 for local mode") {
 			foundError = true
 			break
 		}
 	}
 	if !foundError {
-		t.Errorf("Validate() should contain error about validators between 1 and 4, got: %v", result.Errors)
+		t.Errorf("Validate() should contain local-mode validator limit error, got: %v", result.Errors)
 	}
 }
 
@@ -379,12 +380,31 @@ func TestYAMLValidator_Validate_ZeroValidators(t *testing.T) {
 	}
 	foundError := false
 	for _, err := range result.Errors {
-		if err.Field == "spec.validators" && strings.Contains(err.Message, "between 1 and 4") {
+		if err.Field == "spec.validators" && strings.Contains(err.Message, "invalid validators") {
 			foundError = true
 			break
 		}
 	}
 	if !foundError {
 		t.Errorf("Validate() should contain error about validators, got: %v", result.Errors)
+	}
+}
+
+func TestYAMLValidator_Validate_DockerAllowsUpTo100(t *testing.T) {
+	v := NewYAMLValidator()
+	devnet := &YAMLDevnet{
+		APIVersion: SupportedAPIVersion,
+		Kind:       SupportedKind,
+		Metadata:   YAMLMetadata{Name: "test"},
+		Spec: YAMLDevnetSpec{
+			Network:    "stable",
+			Mode:       "docker",
+			Validators: 100,
+		},
+	}
+
+	result := v.Validate(devnet)
+	if !result.Valid {
+		t.Fatalf("Validate() should pass for docker validators=100, errors: %v", result.Errors)
 	}
 }

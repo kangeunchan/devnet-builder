@@ -200,11 +200,20 @@ func (s *InteractiveSetup) promptNetworkSource(cfg *FileConfig) (string, error) 
 	return result, nil
 }
 
-// promptValidators prompts the user to enter validators count (1-4).
+// promptValidators prompts the user to enter validators count using mode-aware bounds.
 func (s *InteractiveSetup) promptValidators(cfg *FileConfig) (int, error) {
 	defaultValue := "4"
 	if cfg.Validators != nil {
 		defaultValue = strconv.Itoa(*cfg.Validators)
+	}
+
+	mode := ""
+	if cfg.ExecutionMode != nil {
+		mode = string(*cfg.ExecutionMode)
+	}
+	min, max, resolvedMode, err := ValidatorCountRangeForMode(mode)
+	if err != nil {
+		return 0, err
 	}
 
 	validate := func(input string) error {
@@ -212,14 +221,14 @@ func (s *InteractiveSetup) promptValidators(cfg *FileConfig) (int, error) {
 		if err != nil {
 			return fmt.Errorf("please enter a number")
 		}
-		if val < 1 || val > 4 {
-			return fmt.Errorf("validators must be between 1 and 4")
+		if err := ValidateValidatorCount(mode, val); err != nil {
+			return err
 		}
 		return nil
 	}
 
 	prompt := promptui.Prompt{
-		Label:    "Number of validators (1-4)",
+		Label:    fmt.Sprintf("Number of validators (%d-%d for %s mode)", min, max, resolvedMode),
 		Default:  defaultValue,
 		Validate: validate,
 		Templates: &promptui.PromptTemplates{

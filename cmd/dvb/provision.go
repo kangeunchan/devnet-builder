@@ -170,6 +170,26 @@ func detectProvisionMode(opts *provisionOptions) ProvisionMode {
 	return InteractiveMode
 }
 
+func validateFlagModeOptions(opts *provisionOptions) error {
+	// Validate required flags
+	if opts.name == "" {
+		return fmt.Errorf("--name is required in flag mode")
+	}
+	if opts.network == "" {
+		return fmt.Errorf("--network is required in flag mode")
+	}
+
+	// Validate options
+	if err := config.ValidateValidatorCount(opts.mode, opts.validators); err != nil {
+		return err
+	}
+	if opts.fullNodes < 0 {
+		return fmt.Errorf("--full-nodes cannot be negative")
+	}
+
+	return nil
+}
+
 // runInteractiveMode handles interactive wizard mode
 func runInteractiveMode(ctx context.Context, opts *provisionOptions) error {
 	// Interactive mode requires a TTY
@@ -236,23 +256,8 @@ func runFlagMode(ctx context.Context, opts *provisionOptions) error {
 		}
 	}
 
-	// Validate required flags
-	if opts.name == "" {
-		return fmt.Errorf("--name is required in flag mode")
-	}
-	if opts.network == "" {
-		return fmt.Errorf("--network is required in flag mode")
-	}
-
-	// Validate options
-	if opts.validators < 1 {
-		return fmt.Errorf("--validators must be at least 1")
-	}
-	if opts.fullNodes < 0 {
-		return fmt.Errorf("--full-nodes cannot be negative")
-	}
-	if opts.mode != "docker" && opts.mode != "local" {
-		return fmt.Errorf("--mode must be 'docker' or 'local'")
+	if err := validateFlagModeOptions(opts); err != nil {
+		return err
 	}
 
 	// Build devnet spec

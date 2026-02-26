@@ -122,6 +122,60 @@ func TestDetectProvisionMode(t *testing.T) {
 	}
 }
 
+func TestValidateFlagModeOptions_ValidatorBounds(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       *provisionOptions
+		wantErr    bool
+		errContain string
+	}{
+		{
+			name: "docker allows up to 100",
+			opts: &provisionOptions{
+				name:       "devnet-a",
+				network:    "stable",
+				mode:       "docker",
+				validators: 100,
+			},
+			wantErr: false,
+		},
+		{
+			name: "local rejects above 4",
+			opts: &provisionOptions{
+				name:       "devnet-a",
+				network:    "stable",
+				mode:       "local",
+				validators: 5,
+			},
+			wantErr:    true,
+			errContain: "1-4 for local mode",
+		},
+		{
+			name: "docker rejects above 100",
+			opts: &provisionOptions{
+				name:       "devnet-a",
+				network:    "stable",
+				mode:       "docker",
+				validators: 101,
+			},
+			wantErr:    true,
+			errContain: "1-100 for docker mode",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateFlagModeOptions(tt.opts)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateFlagModeOptions() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.errContain != "" && err != nil && !strings.Contains(err.Error(), tt.errContain) {
+				t.Fatalf("expected error containing %q, got %q", tt.errContain, err.Error())
+			}
+		})
+	}
+}
+
 func TestProvisionOptions_NoWaitFlag(t *testing.T) {
 	tests := []struct {
 		name     string

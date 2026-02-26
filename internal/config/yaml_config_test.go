@@ -104,6 +104,40 @@ func TestYAMLDevnet_Validate_InvalidValidators(t *testing.T) {
 	}
 }
 
+func TestYAMLDevnet_Validate_DockerValidatorsUpperBound(t *testing.T) {
+	devnet := YAMLDevnet{
+		APIVersion: "devnet.lagos/v1",
+		Kind:       "Devnet",
+		Metadata:   YAMLMetadata{Name: "test"},
+		Spec: YAMLDevnetSpec{
+			Network:    "stable",
+			Mode:       "docker",
+			Validators: 100,
+		},
+	}
+
+	if err := devnet.Validate(); err != nil {
+		t.Fatalf("Validate() failed for docker validators=100: %v", err)
+	}
+}
+
+func TestYAMLDevnet_Validate_LocalValidatorsUpperBound(t *testing.T) {
+	devnet := YAMLDevnet{
+		APIVersion: "devnet.lagos/v1",
+		Kind:       "Devnet",
+		Metadata:   YAMLMetadata{Name: "test"},
+		Spec: YAMLDevnetSpec{
+			Network:    "stable",
+			Mode:       "local",
+			Validators: 5,
+		},
+	}
+
+	if err := devnet.Validate(); err == nil {
+		t.Fatalf("Validate() should fail for local validators=5")
+	}
+}
+
 func TestYAMLDevnetNamespace(t *testing.T) {
 	yamlContent := `
 apiVersion: devnet.lagos/v1

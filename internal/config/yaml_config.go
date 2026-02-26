@@ -115,12 +115,16 @@ func (s *YAMLDevnetSpec) Validate() error {
 		errs = append(errs, "spec.network is required")
 	}
 
-	if s.Validators < 1 {
-		errs = append(errs, "spec.validators must be at least 1")
+	modeValid := true
+	if s.Mode != "" && s.Mode != "docker" && s.Mode != "local" {
+		modeValid = false
+		errs = append(errs, fmt.Sprintf("spec.mode must be 'docker' or 'local', got %q", s.Mode))
 	}
 
-	if s.Mode != "" && s.Mode != "docker" && s.Mode != "local" {
-		errs = append(errs, fmt.Sprintf("spec.mode must be 'docker' or 'local', got %q", s.Mode))
+	if modeValid {
+		if err := ValidateValidatorCount(s.Mode, s.Validators); err != nil {
+			errs = append(errs, fmt.Sprintf("spec.validators %s", err.Error()))
+		}
 	}
 
 	if s.NetworkType != "" && s.NetworkType != "mainnet" && s.NetworkType != "testnet" {

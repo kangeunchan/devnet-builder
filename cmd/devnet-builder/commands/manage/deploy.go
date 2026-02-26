@@ -293,17 +293,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if !types.NetworkSource(deployNetwork).IsValid() {
 		return fmt.Errorf("invalid network: %s (must be 'mainnet' or 'testnet')", deployNetwork)
 	}
-	// Validate validator count based on mode
-	if deployMode == string(types.ExecutionModeDocker) {
-		if deployValidators < 1 || deployValidators > 100 {
-			return fmt.Errorf("invalid validators: %d (must be 1-100 for docker mode)", deployValidators)
-		}
-	} else if deployMode == string(types.ExecutionModeLocal) {
-		if deployValidators < 1 || deployValidators > 4 {
-			return fmt.Errorf("invalid validators: %d (must be 1-4 for local mode)", deployValidators)
-		}
-	} else {
-		return fmt.Errorf("invalid mode: %s (must be 'docker' or 'local')", deployMode)
+	// Validate validator count using shared mode-aware constraints.
+	if err := config.ValidateValidatorCount(deployMode, deployValidators); err != nil {
+		return err
 	}
 
 	// Validate port availability for local mode before proceeding
