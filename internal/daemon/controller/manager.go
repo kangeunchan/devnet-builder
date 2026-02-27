@@ -178,21 +178,34 @@ func (m *Manager) runWorker(ctx context.Context, resourceType string, workerID i
 
 // processItem handles a single work item.
 func (m *Manager) processItem(ctx context.Context, resourceType string, ctrl Controller, queue *WorkQueue, key string) {
-	defer queue.Done(key)
-
 	m.logger.Debug("reconciling",
 		"resourceType", resourceType,
 		"key", key)
 
 	err := ctrl.Reconcile(ctx, key)
 	if err != nil {
-		m.logger.Error("reconcile failed, requeuing",
+		requeue := queue.RequeueWithBackoff(key)
+		if requeue.Terminal {
+			m.logger.Error("reconcile failed permanently, dropping item",
+				"resourceType", resourceType,
+				"key", key,
+				"maxRetries", queue.MaxRetries(),
+				"error", err)
+			queue.Forget(key)
+			return
+		}
+
+		m.logger.Warn("reconcile failed, scheduling retry",
 			"resourceType", resourceType,
 			"key", key,
+			"retryCount", requeue.Attempt,
+			"nextDelay", requeue.Delay,
 			"error", err)
-		queue.Requeue(key)
 		return
 	}
+
+	queue.Done(key)
+	queue.Forget(key)
 
 	m.logger.Debug("reconcile complete",
 		"resourceType", resourceType,
