@@ -32,7 +32,7 @@ type ConfigEditor struct {
 // NewConfigEditor creates a new ConfigEditor.
 func NewConfigEditor(nodeDir string, logger *output.Logger) *ConfigEditor {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 	return &ConfigEditor{
 		nodeDir: nodeDir,

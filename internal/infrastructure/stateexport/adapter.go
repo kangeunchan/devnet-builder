@@ -28,7 +28,7 @@ type Adapter struct {
 // NewAdapter creates a new StateExportAdapter.
 func NewAdapter(homeDir string, logger *output.Logger) *Adapter {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 	return &Adapter{
 		homeDir: homeDir,

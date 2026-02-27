@@ -32,7 +32,7 @@ func NewOrchestrator(
 	logger *output.Logger,
 ) *OrchestratorImpl {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 
 	// Default state directory: ~/.devnet-builder/state
@@ -57,7 +57,7 @@ func NewOrchestratorWithStateDir(
 	logger *output.Logger,
 ) *OrchestratorImpl {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 	return &OrchestratorImpl{
 		networkManager: networkManager,

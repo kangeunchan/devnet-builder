@@ -79,7 +79,7 @@ func NewDockerManager(image string, logger *output.Logger) *DockerManager {
 		image = DefaultDockerImage
 	}
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 	return &DockerManager{
 		Image:  image,

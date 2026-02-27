@@ -21,7 +21,7 @@ type BinaryCache struct {
 
 func NewBinaryCache(homeDir, binaryName string, logger *output.Logger) *BinaryCache {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 	if binaryName == "" {
 		binaryName = paths.DefaultBinaryName

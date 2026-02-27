@@ -29,7 +29,7 @@ type FetcherAdapter struct {
 // NewFetcherAdapter creates a new FetcherAdapter.
 func NewFetcherAdapter(homeDir, binaryPath, dockerImage string, useDocker bool, logger *output.Logger) *FetcherAdapter {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 	return &FetcherAdapter{
 		homeDir:     homeDir,

@@ -28,7 +28,7 @@ type Service struct {
 // NewService creates a new migration service.
 func NewService(repository ports.VersionRepository, logger *output.Logger) *Service {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 	return &Service{
 		repository: repository,

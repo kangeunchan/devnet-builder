@@ -42,7 +42,7 @@ type DownloadOptions struct {
 func Download(ctx context.Context, opts DownloadOptions) (*SnapshotCache, error) {
 	logger := opts.Logger
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 
 	// Check cache first (unless NoCache is set)

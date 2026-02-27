@@ -22,6 +22,7 @@ var globalLoader *plugin.Loader
 func main() {
 	// Enable color output
 	color.NoColor = false
+	logger := output.NewLogger()
 
 	// Load plugins from ~/.devnet-builder/plugins/
 	globalLoader = plugin.NewLoader()
@@ -29,7 +30,7 @@ func main() {
 	// Load all discovered plugins with detailed error information
 	loadResult, loadErr := globalLoader.LoadAllWithErrors()
 	if loadErr != nil {
-		output.DefaultLogger.Debug("Plugin loading error: %v", loadErr)
+		logger.Debug("Plugin loading error: %v", loadErr)
 	}
 
 	// Log which plugins were successfully loaded
@@ -38,11 +39,11 @@ func main() {
 		for _, p := range loadResult.Loaded {
 			loadedNames = append(loadedNames, p.Name())
 		}
-		output.DefaultLogger.Debug("Successfully loaded %d plugins: %v", len(loadResult.Loaded), loadedNames)
+		logger.Debug("Successfully loaded %d plugins: %v", len(loadResult.Loaded), loadedNames)
 
 		// Log detailed errors for plugins that failed to load
 		for _, loadErr := range loadResult.Errors {
-			output.DefaultLogger.Warn("Failed to load plugin %q: %v", loadErr.PluginName, loadErr.Err)
+			logger.Warn("Failed to load plugin %q: %v", loadErr.PluginName, loadErr.Err)
 		}
 	}
 
@@ -57,7 +58,7 @@ func main() {
 		// Create an adapter to convert pkg/network.Module to internal/network.NetworkModule
 		adapter := newPluginAdapter(p.Module())
 		if err := network.MustRegister(adapter, false); err != nil {
-			output.DefaultLogger.Warn("Failed to register plugin %q: %v", p.Name(), err)
+			logger.Warn("Failed to register plugin %q: %v", p.Name(), err)
 		}
 	}
 
@@ -67,7 +68,7 @@ func main() {
 	if envHome := os.Getenv("DEVNET_HOME"); envHome != "" {
 		homeDir = envHome
 	}
-	if err := checkAndMigrateVersion(homeDir); err != nil {
+	if err := checkAndMigrateVersion(homeDir, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "Version migration failed: %v\n", err)
 		globalLoader.Close()
 		os.Exit(1)
@@ -103,10 +104,7 @@ func GetPluginLoader() *plugin.Loader {
 }
 
 // checkAndMigrateVersion checks the current version and applies migrations if needed.
-func checkAndMigrateVersion(homeDir string) error {
-	// Use default logger for migration
-	logger := output.DefaultLogger
-
+func checkAndMigrateVersion(homeDir string, logger *output.Logger) error {
 	// Create infrastructure factory
 	factory := di.NewInfrastructureFactory(homeDir, logger)
 

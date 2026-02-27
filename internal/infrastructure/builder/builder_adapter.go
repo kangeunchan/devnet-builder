@@ -22,7 +22,7 @@ type BuilderAdapter struct {
 // NewBuilderAdapter creates a new BuilderAdapter.
 func NewBuilderAdapter(homeDir string, logger *output.Logger, module network.NetworkModule) *BuilderAdapter {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 
 	var b *Builder

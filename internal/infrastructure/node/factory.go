@@ -23,7 +23,7 @@ type FactoryConfig struct {
 	// EVMChainID is the EVM chain ID (optional, used for --evm.evm-chain-id flag).
 	EVMChainID string
 
-	// Logger is the output logger. If nil, uses DefaultLogger.
+	// Logger is the output logger. If nil, a new logger is created.
 	Logger *output.Logger
 }
 
@@ -59,7 +59,7 @@ func (f *NodeManagerFactory) Create() (NodeManager, error) {
 
 	logger := f.config.Logger
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 
 	switch f.config.Mode {

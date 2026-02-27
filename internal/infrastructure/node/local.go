@@ -36,7 +36,7 @@ func NewLocalManager(binary string, logger *output.Logger) *LocalManager {
 		binary = DefaultLocalBinary
 	}
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 	return &LocalManager{
 		Binary: binary,

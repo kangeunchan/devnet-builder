@@ -27,7 +27,7 @@ func NewLocalNodeManager(
 	logger *output.Logger,
 ) *LocalNodeManager {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 
 	return &LocalNodeManager{
@@ -131,7 +131,7 @@ func NewDockerNodeManager(
 	logger *output.Logger,
 ) *DockerNodeManager {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 
 	return &DockerNodeManager{

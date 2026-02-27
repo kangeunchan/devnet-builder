@@ -120,7 +120,7 @@ type Builder struct {
 // A NetworkModule is required for building - use network plugins to provide one.
 func NewBuilder(homeDir string, logger *output.Logger, networkModule network.NetworkModule) *Builder {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 	return &Builder{
 		homeDir: homeDir,

@@ -34,7 +34,7 @@ type NodeInitializer struct {
 // NewNodeInitializer creates a new NodeInitializer.
 func NewNodeInitializer(mode types.ExecutionMode, dockerImage string, logger *output.Logger) *NodeInitializer {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 	return &NodeInitializer{
 		mode:        mode,
@@ -47,7 +47,7 @@ func NewNodeInitializer(mode types.ExecutionMode, dockerImage string, logger *ou
 // For local mode, this should be the managed binary at ~/.devnet-builder/bin/stabled.
 func NewNodeInitializerWithBinary(mode types.ExecutionMode, dockerImage, binaryPath string, logger *output.Logger) *NodeInitializer {
 	if logger == nil {
-		logger = output.DefaultLogger
+		logger = output.NewLogger()
 	}
 	return &NodeInitializer{
 		mode:        mode,

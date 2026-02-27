@@ -99,7 +99,7 @@ func TestResumeUseCase_CheckState(t *testing.T) {
 		mockManager := &MockStateManager{State: nil}
 		mockDetector := &MockStateDetector{}
 		transitioner := upgrade.NewStateTransitioner()
-		logger := output.DefaultLogger
+		logger := output.NewLogger()
 
 		uc := upgrade.NewResumeUseCase(mockManager, mockDetector, transitioner, nil, logger)
 
@@ -113,7 +113,7 @@ func TestResumeUseCase_CheckState(t *testing.T) {
 		mockManager := &MockStateManager{State: existingState}
 		mockDetector := &MockStateDetector{}
 		transitioner := upgrade.NewStateTransitioner()
-		logger := output.DefaultLogger
+		logger := output.NewLogger()
 
 		uc := upgrade.NewResumeUseCase(mockManager, mockDetector, transitioner, nil, logger)
 
@@ -130,7 +130,7 @@ func TestResumeUseCase_ClearState(t *testing.T) {
 	mockManager := &MockStateManager{State: existingState}
 	mockDetector := &MockStateDetector{}
 	transitioner := upgrade.NewStateTransitioner()
-	logger := output.DefaultLogger
+	logger := output.NewLogger()
 
 	uc := upgrade.NewResumeUseCase(mockManager, mockDetector, transitioner, nil, logger)
 
@@ -145,7 +145,7 @@ func TestResumeUseCase_Resume_ClearStateOption(t *testing.T) {
 	mockManager := &MockStateManager{State: existingState}
 	mockDetector := &MockStateDetector{}
 	transitioner := upgrade.NewStateTransitioner()
-	logger := output.DefaultLogger
+	logger := output.NewLogger()
 
 	uc := upgrade.NewResumeUseCase(mockManager, mockDetector, transitioner, nil, logger)
 
@@ -165,7 +165,7 @@ func TestResumeUseCase_Resume_ShowStatusOption(t *testing.T) {
 	mockManager := &MockStateManager{State: existingState}
 	mockDetector := &MockStateDetector{}
 	transitioner := upgrade.NewStateTransitioner()
-	logger := output.DefaultLogger
+	logger := output.NewLogger()
 
 	uc := upgrade.NewResumeUseCase(mockManager, mockDetector, transitioner, nil, logger)
 
@@ -185,7 +185,7 @@ func TestResumeUseCase_Resume_ForceRestartOption(t *testing.T) {
 	mockManager := &MockStateManager{State: existingState}
 	mockDetector := &MockStateDetector{}
 	transitioner := upgrade.NewStateTransitioner()
-	logger := output.DefaultLogger
+	logger := output.NewLogger()
 
 	uc := upgrade.NewResumeUseCase(mockManager, mockDetector, transitioner, nil, logger)
 
@@ -203,7 +203,7 @@ func TestResumeUseCase_Resume_NoExistingState(t *testing.T) {
 	mockManager := &MockStateManager{State: nil}
 	mockDetector := &MockStateDetector{}
 	transitioner := upgrade.NewStateTransitioner()
-	logger := output.DefaultLogger
+	logger := output.NewLogger()
 
 	uc := upgrade.NewResumeUseCase(mockManager, mockDetector, transitioner, nil, logger)
 
@@ -246,7 +246,7 @@ func TestResumeUseCase_Resume_TerminalState(t *testing.T) {
 			mockManager := &MockStateManager{State: existingState}
 			mockDetector := &MockStateDetector{}
 			transitioner := upgrade.NewStateTransitioner()
-			logger := output.DefaultLogger
+			logger := output.NewLogger()
 
 			uc := upgrade.NewResumeUseCase(mockManager, mockDetector, transitioner, nil, logger)
 
@@ -267,7 +267,7 @@ func TestResumeUseCase_Resume_CorruptedState(t *testing.T) {
 	}
 	mockDetector := &MockStateDetector{}
 	transitioner := upgrade.NewStateTransitioner()
-	logger := output.DefaultLogger
+	logger := output.NewLogger()
 
 	uc := upgrade.NewResumeUseCase(mockManager, mockDetector, transitioner, nil, logger)
 
@@ -290,7 +290,7 @@ func TestResumeUseCase_Resume_DetectsStageProgression(t *testing.T) {
 		DetectedStage: ports.ResumableStageVoting,
 	}
 	transitioner := upgrade.NewStateTransitioner()
-	logger := output.DefaultLogger
+	logger := output.NewLogger()
 
 	// Note: We can't fully test resume execution without a mock ResumableExecuteUpgradeUseCase
 	// This test verifies the detection and state update logic
@@ -312,7 +312,7 @@ func TestResumeUseCase_Reconcile(t *testing.T) {
 		mockManager := &MockStateManager{State: nil}
 		mockDetector := &MockStateDetector{}
 		transitioner := upgrade.NewStateTransitioner()
-		logger := output.DefaultLogger
+		logger := output.NewLogger()
 
 		uc := upgrade.NewResumeUseCase(mockManager, mockDetector, transitioner, nil, logger)
 
@@ -331,7 +331,7 @@ func TestResumeUseCase_Reconcile(t *testing.T) {
 			DetectedStage: ports.ResumableStageWaitingForHeight,
 		}
 		transitioner := upgrade.NewStateTransitioner()
-		logger := output.DefaultLogger
+		logger := output.NewLogger()
 
 		uc := upgrade.NewResumeUseCase(mockManager, mockDetector, transitioner, nil, logger)
 
