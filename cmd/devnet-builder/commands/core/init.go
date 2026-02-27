@@ -3,7 +3,6 @@ package core
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application"
@@ -98,41 +97,17 @@ func runInit(cmd *cobra.Command, args []string) error {
 	jsonMode := cfg.JSONMode()
 
 	// Build effective config from: default < config.toml < env < flag
-	// Start with loaded config.toml values
-	fileCfg := cfg.FileConfig()
-	if fileCfg == nil {
-		fileCfg = &config.FileConfig{}
-	}
-
-	// Apply flag values (flags override config.toml)
-	if cmd.Flags().Changed("network") {
-		fileCfg.Network = &initNetwork
-	}
-	if cmd.Flags().Changed("blockchain") {
-		fileCfg.BlockchainNetwork = &initBlockchainNetwork
-	}
-	if cmd.Flags().Changed("validators") {
-		fileCfg.Validators = &initValidators
-	}
-	if cmd.Flags().Changed("mode") {
-		em := types.ExecutionMode(initMode)
-		fileCfg.ExecutionMode = &em
-	}
-	if cmd.Flags().Changed("no-cache") {
-		fileCfg.NoCache = &initNoCache
-	}
-	if cmd.Flags().Changed("accounts") {
-		fileCfg.Accounts = &initAccounts
-	}
-
-	// Apply environment variables (env overrides config.toml but not flags)
-	if networkEnv := os.Getenv("DEVNET_NETWORK"); networkEnv != "" && !cmd.Flags().Changed("network") {
-		fileCfg.Network = &networkEnv
-	}
-	if modeEnv := os.Getenv("DEVNET_MODE"); modeEnv != "" && !cmd.Flags().Changed("mode") {
-		mode := types.ExecutionMode(modeEnv)
-		fileCfg.ExecutionMode = &mode
-	}
+	resolver := config.NewResolver()
+	resolved := resolver.ResolveRuntimeFileConfig(cmd, cfg.FileConfig(), config.RuntimeResolveInput{
+		Network:           initNetwork,
+		BlockchainNetwork: initBlockchainNetwork,
+		Validators:        initValidators,
+		Mode:              types.ExecutionMode(initMode),
+		NetworkVersion:    initVersion,
+		NoCache:           initNoCache,
+		Accounts:          initAccounts,
+	})
+	fileCfg := resolved.FileConfig
 
 	// Run partial interactive setup for missing values
 	setup := config.NewInteractiveSetup(homeDir)

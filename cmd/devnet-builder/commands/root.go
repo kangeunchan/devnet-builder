@@ -4,7 +4,6 @@ package commands
 
 import (
 	"context"
-	"os"
 
 	"github.com/altuslabsxyz/devnet-builder/cmd/devnet-builder/commands/cache"
 	configcmd "github.com/altuslabsxyz/devnet-builder/cmd/devnet-builder/commands/config"
@@ -109,9 +108,6 @@ func persistentPreRunE(cmd *cobra.Command, args []string) error {
 	// Priority: default < config.toml < env < flag
 	applyConfigDefaults(cmd, fileCfg)
 
-	// Environment variables override config.toml (but not explicit flags)
-	applyEnvironmentOverrides(cmd)
-
 	// Build context-based config from FileConfig and CLI overrides
 	cfg := ctxconfig.New(
 		ctxconfig.FromFileConfig(fileCfg),
@@ -150,35 +146,18 @@ func persistentPreRunE(cmd *cobra.Command, args []string) error {
 
 // applyConfigDefaults applies config file values to global flags if not explicitly set.
 func applyConfigDefaults(cmd *cobra.Command, fileCfg *config.FileConfig) {
-	// Apply home from config.toml
-	if !cmd.Flags().Changed("home") && fileCfg.Home != nil {
-		homeDir = *fileCfg.Home
-	}
+	resolver := config.NewResolver()
+	resolved := resolver.ResolveGlobal(cmd, fileCfg, config.GlobalResolveInput{
+		Home:    homeDir,
+		Verbose: verbose,
+		JSON:    jsonMode,
+		NoColor: noColor,
+	})
 
-	// Apply verbose from config.toml
-	if !cmd.Flags().Changed("verbose") && fileCfg.Verbose != nil {
-		verbose = *fileCfg.Verbose
-	}
-
-	// Apply json from config.toml
-	if !cmd.Flags().Changed("json") && fileCfg.JSON != nil {
-		jsonMode = *fileCfg.JSON
-	}
-
-	// Apply no_color from config.toml
-	if !cmd.Flags().Changed("no-color") && fileCfg.NoColor != nil {
-		noColor = *fileCfg.NoColor
-	}
-}
-
-// applyEnvironmentOverrides applies environment variable overrides.
-func applyEnvironmentOverrides(cmd *cobra.Command) {
-	if envHome := os.Getenv("DEVNET_HOME"); envHome != "" && !cmd.Flags().Changed("home") {
-		homeDir = envHome
-	}
-	if os.Getenv("NO_COLOR") != "" && !cmd.Flags().Changed("no-color") {
-		noColor = true
-	}
+	homeDir = resolved.Home.Value
+	verbose = resolved.Verbose.Value
+	jsonMode = resolved.JSON.Value
+	noColor = resolved.NoColor.Value
 }
 
 // registerCommands registers all subcommands with appropriate group assignments.

@@ -155,46 +155,24 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	logger := output.DefaultLogger
 
 	// Build effective config from: default < config.toml < env < flag
-	// Start with loaded config.toml values
-	fileCfg := cfg.FileConfig()
-	if fileCfg == nil {
-		fileCfg = &config.FileConfig{}
-	}
-
-	// Apply flag values (flags override config.toml)
-	if cmd.Flags().Changed("network") {
-		fileCfg.Network = &deployNetwork
-	}
-	if cmd.Flags().Changed("blockchain") {
-		fileCfg.BlockchainNetwork = &deployBlockchainNetwork
-	}
-	if cmd.Flags().Changed("validators") {
-		fileCfg.Validators = &deployValidators
-	}
-	if cmd.Flags().Changed("mode") {
-		mode := types.ExecutionMode(deployMode)
-		fileCfg.ExecutionMode = &mode
-	}
-	if cmd.Flags().Changed("network-version") {
-		fileCfg.NetworkVersion = &deployStableVersion
-	}
-	if cmd.Flags().Changed("no-cache") {
-		fileCfg.NoCache = &deployNoCache
-	}
-	if cmd.Flags().Changed("accounts") {
-		fileCfg.Accounts = &deployAccounts
-	}
-
-	// Apply environment variables (env overrides config.toml but not flags)
-	if networkEnv := os.Getenv("DEVNET_NETWORK"); networkEnv != "" && !cmd.Flags().Changed("network") {
-		fileCfg.Network = &networkEnv
-	}
-	if modeEnv := os.Getenv("DEVNET_MODE"); modeEnv != "" && !cmd.Flags().Changed("mode") {
-		mode := types.ExecutionMode(modeEnv)
-		fileCfg.ExecutionMode = &mode
-	}
-	if versionEnv := os.Getenv("DEVNET_NETWORK_VERSION"); versionEnv != "" && !cmd.Flags().Changed("network-version") {
-		fileCfg.NetworkVersion = &versionEnv
+	resolver := config.NewResolver()
+	resolved := resolver.ResolveRuntimeFileConfig(cmd, cfg.FileConfig(), config.RuntimeResolveInput{
+		Network:           deployNetwork,
+		BlockchainNetwork: deployBlockchainNetwork,
+		Validators:        deployValidators,
+		Mode:              types.ExecutionMode(deployMode),
+		NetworkVersion:    deployStableVersion,
+		NoCache:           deployNoCache,
+		Accounts:          deployAccounts,
+	})
+	fileCfg := resolved.FileConfig
+	if cfg.Verbose() {
+		logger.Debug("Resolved config sources: network=%s mode=%s network_version=%s validators=%s",
+			resolved.Sources["network"],
+			resolved.Sources["mode"],
+			resolved.Sources["network_version"],
+			resolved.Sources["validators"],
+		)
 	}
 
 	// Run partial interactive setup for missing base config values
