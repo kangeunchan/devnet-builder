@@ -5,6 +5,7 @@ linters:
   # Only enable linters that pass with current codebase
   # Additional linters can be enabled incrementally
   enable:
+    - depguard
     - gocritic
     - gosec
     - misspell
@@ -38,6 +39,28 @@ linters:
         - fieldalignment
         - shadow
       enable-all: true
+    depguard:
+      rules:
+        application-boundaries:
+          files:
+            - internal/application/**/*.go
+          deny:
+            - pkg: github.com/altuslabsxyz/devnet-builder/internal/infrastructure
+              desc: application layer must not import infrastructure
+            - pkg: github.com/altuslabsxyz/devnet-builder/internal/daemon
+              desc: application layer must not import daemon
+            - pkg: github.com/altuslabsxyz/devnet-builder/internal/plugin
+              desc: application layer must not import plugin
+        application-ports-boundaries:
+          files:
+            - internal/application/ports/**/*.go
+          deny:
+            - pkg: github.com/altuslabsxyz/devnet-builder/internal/infrastructure
+              desc: ports layer must not import infrastructure
+            - pkg: github.com/altuslabsxyz/devnet-builder/internal/daemon
+              desc: ports layer must not import daemon
+            - pkg: github.com/altuslabsxyz/devnet-builder/internal/plugin
+              desc: ports layer must not import plugin
   exclusions:
     generated: lax
     presets:
@@ -63,6 +86,16 @@ linters:
       - linters:
           - errcheck
         text: "Error return value of .*(Run|Wait|Signal|Cleanup|MarkFlagRequired|Save|Sscanf).* is not checked"
+      # Stage depguard rollout by ignoring known pre-existing boundary debt.
+      - linters:
+          - depguard
+        path: internal/application/(devnet/export|devnet/docker_deploy|devnet/provision|service)\.go
+      - linters:
+          - depguard
+        path: internal/application/ports/provisioner\.go
+      - linters:
+          - depguard
+        path: _test\.go
     paths:
       - third_party$
       - builtin$
