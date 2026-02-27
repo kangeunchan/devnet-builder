@@ -109,6 +109,9 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Compile test packages only
+        run: go test ./... -run='^$'
+
       - name: Run tests with race detection
         run: go test -p 1 -race -v ./...
 
