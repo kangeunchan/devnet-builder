@@ -88,6 +88,7 @@ func TestManager_RequeueOnError(t *testing.T) {
 	ctrl.reconcileErr = errors.New("temporary error")
 
 	m.Register("devnets", ctrl)
+	m.GetQueue("devnets").SetBackoffConfig(time.Millisecond, 5*time.Millisecond, 0, 10)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -99,13 +100,41 @@ func TestManager_RequeueOnError(t *testing.T) {
 	m.Enqueue("devnets", "failing-devnet")
 
 	// Wait for multiple retries
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(60 * time.Millisecond)
 	cancel()
 
 	// Should have been called multiple times due to requeue
 	calls := ctrl.getCalls()
 	if len(calls) < 2 {
 		t.Errorf("expected multiple reconcile calls due to requeue, got %d", len(calls))
+	}
+}
+
+func TestManager_RequeueStopsAtMaxRetries(t *testing.T) {
+	m := NewManager()
+
+	ctrl := &mockController{reconcileErr: errors.New("persistent failure")}
+	m.Register("devnets", ctrl)
+
+	maxRetries := 3
+	m.GetQueue("devnets").SetBackoffConfig(time.Millisecond, 5*time.Millisecond, 0, maxRetries)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go m.Start(ctx, 1)
+	time.Sleep(10 * time.Millisecond)
+
+	m.Enqueue("devnets", "failing-devnet")
+
+	// Give enough time for initial reconcile + max retries.
+	time.Sleep(120 * time.Millisecond)
+	cancel()
+
+	calls := ctrl.getCalls()
+	expected := maxRetries + 1 // initial attempt + retries
+	if len(calls) != expected {
+		t.Fatalf("expected %d reconcile calls, got %d", expected, len(calls))
 	}
 }
 
