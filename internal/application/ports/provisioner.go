@@ -5,9 +5,37 @@ package ports
 import (
 	"context"
 	"time"
-
-	"github.com/altuslabsxyz/devnet-builder/internal/plugin/types"
 )
+
+// GenesisMode specifies how to obtain genesis.
+type GenesisMode string
+
+const (
+	GenesisModeRPC      GenesisMode = "rpc"
+	GenesisModeSnapshot GenesisMode = "snapshot"
+	GenesisModeLocal    GenesisMode = "local"
+	GenesisModeFresh    GenesisMode = "fresh"
+)
+
+// GenesisSource specifies where to get genesis from.
+type GenesisSource struct {
+	Mode        GenesisMode
+	RPCURL      string
+	SnapshotURL string
+	LocalPath   string
+	NetworkType string
+}
+
+// GenesisPatchOptions specifies modifications to apply to genesis.
+type GenesisPatchOptions struct {
+	ChainID       string
+	VotingPeriod  time.Duration
+	UnbondingTime time.Duration
+	InflationRate string
+	MinGasPrice   string
+	BinaryVersion string
+	Validators    []ValidatorInfo
+}
 
 // =============================================================================
 // GenesisForker Interface
@@ -35,10 +63,10 @@ type GenesisForker interface {
 // ForkOptions specifies options for forking genesis.
 type ForkOptions struct {
 	// Source specifies where to get genesis from (RPC, snapshot, or local file)
-	Source types.GenesisSource
+	Source GenesisSource
 
 	// PatchOpts specifies modifications to apply to the forked genesis
-	PatchOpts types.GenesisPatchOptions
+	PatchOpts GenesisPatchOptions
 
 	// BinaryPath is required for snapshot export mode
 	BinaryPath string
@@ -59,7 +87,7 @@ type ForkResult struct {
 	NewChainID string
 
 	// SourceMode indicates how the genesis was obtained
-	SourceMode types.GenesisMode
+	SourceMode GenesisMode
 
 	// FetchedAt is when the genesis was fetched
 	FetchedAt time.Time
@@ -170,10 +198,10 @@ type ProvisionOptions struct {
 	NumFullNodes int
 
 	// GenesisSource specifies where to get genesis from
-	GenesisSource types.GenesisSource
+	GenesisSource GenesisSource
 
 	// GenesisPatchOpts specifies modifications to apply to genesis
-	GenesisPatchOpts types.GenesisPatchOptions
+	GenesisPatchOpts GenesisPatchOptions
 
 	// BinaryVersion specifies the version of the binary to use
 	BinaryVersion string

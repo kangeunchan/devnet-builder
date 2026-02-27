@@ -14,7 +14,6 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	"github.com/altuslabsxyz/devnet-builder/internal/di"
-	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/network"
 	"github.com/altuslabsxyz/devnet-builder/internal/output"
 	"github.com/altuslabsxyz/devnet-builder/internal/paths"
 	"github.com/altuslabsxyz/devnet-builder/types"
@@ -35,7 +34,7 @@ type DevnetService struct {
 type ServiceConfig struct {
 	HomeDir       string
 	Logger        *output.Logger
-	NetworkModule network.NetworkModule
+	NetworkModule ports.NetworkModule
 	DockerMode    bool
 	Options       []di.Option
 }
@@ -59,9 +58,10 @@ func NewDevnetServiceWithConfig(cfg ServiceConfig) (*DevnetService, error) {
 	// Create infrastructure factory
 	factory := di.NewInfrastructureFactory(cfg.HomeDir, logger)
 
-	// Apply network module if provided
+	wireOpts := make([]di.Option, 0, len(cfg.Options)+1)
+	wireOpts = append(wireOpts, cfg.Options...)
 	if cfg.NetworkModule != nil {
-		factory = factory.WithNetworkModule(cfg.NetworkModule)
+		wireOpts = append(wireOpts, di.WithNetworkModule(cfg.NetworkModule))
 	}
 
 	// Apply docker mode if specified
@@ -70,7 +70,7 @@ func NewDevnetServiceWithConfig(cfg ServiceConfig) (*DevnetService, error) {
 	}
 
 	// Wire container with options
-	container, err := factory.WireContainer(cfg.Options...)
+	container, err := factory.WireContainer(wireOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -818,30 +818,7 @@ func (e *NodeNotFoundError) Error() string {
 }
 
 // GetService returns a DevnetService instance using global homeDir.
-// It automatically loads the network module if devnet exists with stored blockchain network.
 func GetService(homeDir string) (*DevnetService, error) {
-	// Try to load network module from existing devnet metadata
-	var networkModule network.NetworkModule
-
-	// Check if devnet exists and load its metadata to get blockchain network
-	metadataPath := paths.DevnetMetadataPath(homeDir)
-	if data, err := os.ReadFile(metadataPath); err == nil {
-		var meta struct {
-			BlockchainNetwork string `json:"blockchain_network"`
-		}
-		if json.Unmarshal(data, &meta) == nil && meta.BlockchainNetwork != "" {
-			if module, err := network.Get(meta.BlockchainNetwork); err == nil {
-				networkModule = module
-			}
-		}
-	}
-
-	if networkModule != nil {
-		return GetServiceWithConfig(ServiceConfig{
-			HomeDir:       homeDir,
-			NetworkModule: networkModule,
-		})
-	}
 	return NewDevnetService(homeDir, output.DefaultLogger)
 }
 

@@ -261,6 +261,21 @@ type ValidationResult struct {
 	MissingFiles []string
 }
 
+// ExportEntity exposes the validated export entity through an interface.
+func (v *ValidationResult) ExportEntity() interface{} {
+	return v.Export
+}
+
+// IsExportComplete indicates whether the export is complete.
+func (v *ValidationResult) IsExportComplete() bool {
+	return v.IsComplete
+}
+
+// ExportMissingFiles returns missing files for incomplete exports.
+func (v *ValidationResult) ExportMissingFiles() []string {
+	return v.MissingFiles
+}
+
 // GetExportsDirectory returns the exports directory path for a devnet.
 func (r *Repository) GetExportsDirectory(devnetHomeDir string) string {
 	return paths.ExportsPath(devnetHomeDir)

@@ -343,18 +343,8 @@ For more information, see: https://github.com/altuslabsxyz/devnet-builder/blob/m
 		return fmt.Errorf("unknown blockchain network: %s (available: %v)", deployBlockchainNetwork, available)
 	}
 
-	// Get network module for DI container
-	networkModule, err := network.Get(deployBlockchainNetwork)
-	if err != nil {
-		return fmt.Errorf("failed to get network module: %w", err)
-	}
-
 	// Check if devnet already exists
-	svc, err := application.GetServiceWithConfig(application.ServiceConfig{
-		HomeDir:       homeDir,
-		NetworkModule: networkModule,
-		DockerMode:    deployMode == string(types.ExecutionModeDocker),
-	})
+	svc, err := application.GetService(homeDir)
 	if err != nil {
 		return fmt.Errorf("failed to initialize service: %w", err)
 	}

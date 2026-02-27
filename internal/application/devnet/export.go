@@ -10,8 +10,6 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	domainExport "github.com/altuslabsxyz/devnet-builder/internal/domain/export"
-	infraExport "github.com/altuslabsxyz/devnet-builder/internal/infrastructure/export"
-	infraprocess "github.com/altuslabsxyz/devnet-builder/internal/infrastructure/process"
 	"github.com/altuslabsxyz/devnet-builder/types"
 )
 
@@ -23,10 +21,9 @@ type ExportUseCase struct {
 	nodeRepo       ports.NodeRepository
 	exportRepo     ports.ExportRepository
 	nodeLifecycle  ports.NodeLifecycleManager // Injected for stop-export-start workflow
-	hashCalc       *infraExport.HashCalculator
-	heightResolver *infraExport.HeightResolver
-	exportExec     *infraExport.ExportExecutor
-	processExec    ports.ProcessExecutor
+	hashCalc       ports.ExportHashCalculator
+	heightResolver ports.ExportHeightResolver
+	exportExec     ports.ExportExecutor
 	logger         ports.Logger
 }
 
@@ -41,17 +38,49 @@ func NewExportUseCase(
 	nodeLifecycle ports.NodeLifecycleManager,
 	logger ports.Logger,
 ) *ExportUseCase {
-	processExec := infraprocess.NewLocalExecutor()
+	return NewExportUseCaseWithDeps(
+		ctx,
+		devnetRepo,
+		nodeRepo,
+		exportRepo,
+		nodeLifecycle,
+		logger,
+		&missingExportHashCalculator{},
+		&missingExportHeightResolver{},
+		&missingExportExecutor{},
+	)
+}
+
+// NewExportUseCaseWithDeps creates an ExportUseCase with explicitly injected dependencies.
+func NewExportUseCaseWithDeps(
+	ctx context.Context,
+	devnetRepo ports.DevnetRepository,
+	nodeRepo ports.NodeRepository,
+	exportRepo ports.ExportRepository,
+	nodeLifecycle ports.NodeLifecycleManager,
+	logger ports.Logger,
+	hashCalc ports.ExportHashCalculator,
+	heightResolver ports.ExportHeightResolver,
+	exportExec ports.ExportExecutor,
+) *ExportUseCase {
+	if hashCalc == nil {
+		hashCalc = &missingExportHashCalculator{}
+	}
+	if heightResolver == nil {
+		heightResolver = &missingExportHeightResolver{}
+	}
+	if exportExec == nil {
+		exportExec = &missingExportExecutor{}
+	}
 
 	return &ExportUseCase{
 		devnetRepo:     devnetRepo,
 		nodeRepo:       nodeRepo,
 		exportRepo:     exportRepo,
 		nodeLifecycle:  nodeLifecycle,
-		hashCalc:       infraExport.NewHashCalculator(),
-		heightResolver: infraExport.NewHeightResolver(),
-		exportExec:     infraExport.NewExportExecutor(),
-		processExec:    processExec,
+		hashCalc:       hashCalc,
+		heightResolver: heightResolver,
+		exportExec:     exportExec,
 		logger:         logger,
 	}
 }
@@ -319,9 +348,14 @@ func (uc *ExportUseCase) Inspect(ctx context.Context, exportPath string) (*dto.E
 		return nil, fmt.Errorf("failed to validate export: %w", err)
 	}
 
-	result, ok := resultInterface.(*infraExport.ValidationResult)
+	result, ok := resultInterface.(ports.ExportValidationResult)
 	if !ok {
 		return nil, fmt.Errorf("invalid validation result type")
+	}
+
+	exportEntity, ok := result.ExportEntity().(*domainExport.Export)
+	if !ok {
+		return nil, fmt.Errorf("invalid export entity type")
 	}
 
 	// Calculate directory size
@@ -329,8 +363,8 @@ func (uc *ExportUseCase) Inspect(ctx context.Context, exportPath string) (*dto.E
 
 	// Calculate genesis file checksum if the file exists
 	var genesisChecksum string
-	if result.Export.GenesisFilePath != "" {
-		checksum, err := uc.hashCalc.CalculateHash(result.Export.GenesisFilePath)
+	if exportEntity.GenesisFilePath != "" {
+		checksum, err := uc.hashCalc.CalculateHash(exportEntity.GenesisFilePath)
 		if err == nil {
 			genesisChecksum = checksum
 		}
@@ -338,10 +372,10 @@ func (uc *ExportUseCase) Inspect(ctx context.Context, exportPath string) (*dto.E
 	}
 
 	output := &dto.ExportInspectOutput{
-		Metadata:        result.Export.Metadata,
+		Metadata:        exportEntity.Metadata,
 		GenesisChecksum: genesisChecksum,
-		IsComplete:      result.IsComplete,
-		MissingFiles:    result.MissingFiles,
+		IsComplete:      result.IsExportComplete(),
+		MissingFiles:    result.ExportMissingFiles(),
 		SizeBytes:       size,
 	}
 
@@ -363,4 +397,26 @@ func calculateDirectorySize(path string) (int64, error) {
 	})
 
 	return size, err
+}
+
+type missingExportHashCalculator struct{}
+
+func (m *missingExportHashCalculator) CalculateHash(_ string) (string, error) {
+	return "", fmt.Errorf("export hash calculator is not configured")
+}
+
+type missingExportHeightResolver struct{}
+
+func (m *missingExportHeightResolver) GetCurrentHeight(_ context.Context, _ string) (int64, error) {
+	return 0, fmt.Errorf("export height resolver is not configured")
+}
+
+type missingExportExecutor struct{}
+
+func (m *missingExportExecutor) GetBinaryVersion(_ context.Context, _ string) (string, error) {
+	return "", fmt.Errorf("export executor is not configured")
+}
+
+func (m *missingExportExecutor) ExportAtHeight(_ context.Context, _, _ string, _ int64, _ string) (string, error) {
+	return "", fmt.Errorf("export executor is not configured")
 }

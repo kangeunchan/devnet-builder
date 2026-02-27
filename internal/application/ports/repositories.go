@@ -204,3 +204,11 @@ type ExportRepository interface {
 	// Validate checks export completeness
 	Validate(ctx context.Context, exportPath string) (interface{}, error)
 }
+
+// ExportValidationResult provides a typed view over validation results without
+// exposing infrastructure-layer concrete types to the application layer.
+type ExportValidationResult interface {
+	ExportEntity() interface{}
+	IsExportComplete() bool
+	ExportMissingFiles() []string
+}

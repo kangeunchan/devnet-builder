@@ -8,6 +8,7 @@ import (
 	appdevnet "github.com/altuslabsxyz/devnet-builder/internal/application/devnet"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
+	infraexport "github.com/altuslabsxyz/devnet-builder/internal/infrastructure/export"
 )
 
 // DevnetUseCasesProvider provides access to devnet-related use cases.
@@ -165,13 +166,16 @@ func (d *devnetUseCases) ExportUseCase(ctx context.Context) *appdevnet.ExportUse
 	defer d.mu.Unlock()
 
 	if d.exportUC == nil {
-		d.exportUC = appdevnet.NewExportUseCase(
+		d.exportUC = appdevnet.NewExportUseCaseWithDeps(
 			ctx,
 			d.infra.DevnetRepository(),
 			d.infra.NodeRepository(),
 			d.infra.ExportRepository(),
 			nodeLifecycle,
 			d.infra.Logger(),
+			infraexport.NewHashCalculator(),
+			infraexport.NewHeightResolver(),
+			infraexport.NewExportExecutor(),
 		)
 	}
 	return d.exportUC

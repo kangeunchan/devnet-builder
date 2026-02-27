@@ -11,7 +11,6 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	domainExport "github.com/altuslabsxyz/devnet-builder/internal/domain/export"
-	infraExport "github.com/altuslabsxyz/devnet-builder/internal/infrastructure/export"
 	"github.com/altuslabsxyz/devnet-builder/types"
 )
 
@@ -114,9 +113,25 @@ func (m *mockExportRepository) Validate(ctx context.Context, exportPath string) 
 	if m.validateFunc != nil {
 		return m.validateFunc(ctx, exportPath)
 	}
-	return &infraExport.ValidationResult{
-		IsComplete: true,
-	}, nil
+	return &mockExportValidationResult{isComplete: true}, nil
+}
+
+type mockExportValidationResult struct {
+	export      *domainExport.Export
+	isComplete  bool
+	missingFile []string
+}
+
+func (m *mockExportValidationResult) ExportEntity() interface{} {
+	return m.export
+}
+
+func (m *mockExportValidationResult) IsExportComplete() bool {
+	return m.isComplete
+}
+
+func (m *mockExportValidationResult) ExportMissingFiles() []string {
+	return m.missingFile
 }
 
 type mockLogger struct{}
@@ -366,10 +381,10 @@ func TestExportUseCase_Inspect_Success(t *testing.T) {
 
 	exportRepo := &mockExportRepository{
 		validateFunc: func(ctx context.Context, exportPath string) (interface{}, error) {
-			return &infraExport.ValidationResult{
-				Export:       export,
-				IsComplete:   true,
-				MissingFiles: []string{},
+			return &mockExportValidationResult{
+				export:      export,
+				isComplete:  true,
+				missingFile: []string{},
 			}, nil
 		},
 	}
@@ -437,10 +452,10 @@ func TestExportUseCase_Inspect_IncompleteExport(t *testing.T) {
 
 	exportRepo := &mockExportRepository{
 		validateFunc: func(ctx context.Context, exportPath string) (interface{}, error) {
-			return &infraExport.ValidationResult{
-				Export:       export,
-				IsComplete:   false,
-				MissingFiles: []string{"genesis.json"},
+			return &mockExportValidationResult{
+				export:      export,
+				isComplete:  false,
+				missingFile: []string{"genesis.json"},
 			}, domainExport.ErrExportIncomplete
 		},
 	}

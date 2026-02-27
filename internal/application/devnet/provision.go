@@ -10,11 +10,10 @@ import (
 	"time"
 
 	"github.com/cosmos/cosmos-sdk/types/bech32"
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
-	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/stateexport"
-	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/tomlutil"
 	"github.com/altuslabsxyz/devnet-builder/internal/paths"
 	"github.com/altuslabsxyz/devnet-builder/types"
 )
@@ -689,7 +688,7 @@ func (uc *ProvisionUseCase) mergeConfig(filePath string, override []byte) error 
 		return fmt.Errorf("failed to read config: %w", err)
 	}
 
-	merged, err := tomlutil.MergeTOML(base, override)
+	merged, err := mergeTOML(base, override)
 	if err != nil {
 		return err
 	}
@@ -699,6 +698,52 @@ func (uc *ProvisionUseCase) mergeConfig(filePath string, override []byte) error 
 	}
 
 	return nil
+}
+
+func mergeTOML(base, override []byte) ([]byte, error) {
+	if len(override) == 0 {
+		return base, nil
+	}
+	if len(base) == 0 {
+		return override, nil
+	}
+
+	var baseMap map[string]any
+	if err := toml.Unmarshal(base, &baseMap); err != nil {
+		return nil, fmt.Errorf("failed to parse base TOML: %w", err)
+	}
+
+	var overrideMap map[string]any
+	if err := toml.Unmarshal(override, &overrideMap); err != nil {
+		return nil, fmt.Errorf("failed to parse override TOML: %w", err)
+	}
+
+	deepMergeTOML(baseMap, overrideMap)
+
+	merged, err := toml.Marshal(baseMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal merged TOML: %w", err)
+	}
+
+	return merged, nil
+}
+
+func deepMergeTOML(base, override map[string]any) {
+	for key, overrideVal := range override {
+		baseVal, exists := base[key]
+		if !exists {
+			base[key] = overrideVal
+			continue
+		}
+
+		baseMap, baseIsMap := baseVal.(map[string]any)
+		overrideMap, overrideIsMap := overrideVal.(map[string]any)
+		if baseIsMap && overrideIsMap {
+			deepMergeTOML(baseMap, overrideMap)
+			continue
+		}
+		base[key] = overrideVal
+	}
 }
 
 // buildPersistentPeers builds the persistent peers string from node metadata.
@@ -756,26 +801,6 @@ func (uc *ProvisionUseCase) exportGenesisFromSnapshot(ctx context.Context, input
 	}
 	if fromCache {
 		uc.logger.Success("Using cached snapshot")
-	}
-
-	// Step 1.5: Check genesis cache BEFORE extraction
-	// If snapshot was cached and genesis cache exists, use it directly
-	if fromCache && cacheKey != "" && !input.NoCache {
-		cache, err := stateexport.GetValidGenesisCache(input.HomeDir, cacheKey)
-		if err == nil && cache != nil {
-			// Verify the cached genesis is from the same snapshot
-			if cache.SnapshotURL == snapshotURL {
-				// Read cached genesis
-				genesis, err := os.ReadFile(cache.FilePath)
-				if err == nil {
-					uc.logger.Info("Using cached genesis export (expires in %s)", cache.TimeUntilExpiry().Round(time.Minute))
-					return genesis, nil
-				}
-				uc.logger.Debug("Failed to read cached genesis: %v", err)
-			} else {
-				uc.logger.Debug("Cached genesis is from different snapshot, will re-export")
-			}
-		}
 	}
 
 	// Create temp directory for extraction and export

@@ -11,7 +11,6 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	domainports "github.com/altuslabsxyz/devnet-builder/internal/domain/ports"
-	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/node"
 	"github.com/altuslabsxyz/devnet-builder/types"
 )
 
@@ -281,9 +280,9 @@ func (uc *DockerDestroyUseCase) findDevnetContainers(ctx context.Context, networ
 }
 
 // GetDefaultNodePorts returns default ports for a node at given index in Docker mode
-func GetDefaultNodePorts(basePort, nodeIndex int) *node.NodePorts {
+func GetDefaultNodePorts(basePort, nodeIndex int) *ports.PortConfig {
 	offset := nodeIndex * 100
-	return &node.NodePorts{
+	return &ports.PortConfig{
 		RPC:    basePort + offset,
 		P2P:    basePort + offset + 1,
 		GRPC:   basePort + offset + 2,

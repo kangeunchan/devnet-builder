@@ -16,6 +16,7 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/upgrade"
+	infraexport "github.com/altuslabsxyz/devnet-builder/internal/infrastructure/export"
 	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/network"
 	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/persistence"
 	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/plugin"
@@ -852,13 +853,16 @@ func (c *Container) ExportUseCase(ctx context.Context) *appdevnet.ExportUseCase 
 	defer c.mu.Unlock()
 
 	if c.exportUC == nil {
-		c.exportUC = appdevnet.NewExportUseCase(
+		c.exportUC = appdevnet.NewExportUseCaseWithDeps(
 			ctx,
 			c.devnetRepo,
 			c.nodeRepo,
 			c.exportRepo,
 			nodeLifecycle,
 			c.LoggerPort(),
+			infraexport.NewHashCalculator(),
+			infraexport.NewHeightResolver(),
+			infraexport.NewExportExecutor(),
 		)
 	}
 	return c.exportUC
