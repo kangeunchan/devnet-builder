@@ -112,14 +112,14 @@ func TestRepository_Save(t *testing.T) {
 	}
 }
 
-func TestRepository_Save_InvalidType(t *testing.T) {
+func TestRepository_Save_NilExport(t *testing.T) {
 	ctx := context.Background()
 	repo := NewRepository(t.TempDir())
 
-	err := repo.Save(ctx, "invalid type")
+	err := repo.Save(ctx, nil)
 
-	if err == nil {
-		t.Fatal("expected error for invalid type")
+	if err == nil || err.Error() != "export cannot be nil" {
+		t.Fatalf("expected nil export error, got %v", err)
 	}
 }
 
@@ -153,14 +153,9 @@ func TestRepository_Load(t *testing.T) {
 	}
 
 	// Load back
-	loadedInterface, err := repo.Load(ctx, exportDir)
+	loadedExport, err := repo.Load(ctx, exportDir)
 	if err != nil {
 		t.Fatalf("failed to load export: %v", err)
-	}
-
-	loadedExport, ok := loadedInterface.(*domainExport.Export)
-	if !ok {
-		t.Fatalf("expected *domainExport.Export, got %T", loadedInterface)
 	}
 
 	// Verify loaded data matches original
@@ -272,14 +267,9 @@ func TestRepository_ListForDevnet(t *testing.T) {
 	}
 
 	// List exports
-	listInterface, err := repo.ListForDevnet(ctx, tmpDir)
+	exports, err := repo.ListForDevnet(ctx, tmpDir)
 	if err != nil {
 		t.Fatalf("failed to list exports: %v", err)
-	}
-
-	exports, ok := listInterface.([]*domainExport.Export)
-	if !ok {
-		t.Fatalf("expected []*domainExport.Export, got %T", listInterface)
 	}
 
 	if len(exports) != 2 {
@@ -300,14 +290,9 @@ func TestRepository_ListForDevnet_NoExportsDir(t *testing.T) {
 	repo := NewRepository(filepath.Join(tmpDir, "exports"))
 
 	// List when exports directory doesn't exist
-	listInterface, err := repo.ListForDevnet(ctx, tmpDir)
+	exports, err := repo.ListForDevnet(ctx, tmpDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-
-	exports, ok := listInterface.([]*domainExport.Export)
-	if !ok {
-		t.Fatalf("expected []*domainExport.Export, got %T", listInterface)
 	}
 
 	if len(exports) != 0 {
@@ -414,14 +399,9 @@ func TestRepository_Validate(t *testing.T) {
 	}
 
 	// Validate
-	resultInterface, err := repo.Validate(ctx, exportDir)
+	result, err := repo.Validate(ctx, exportDir)
 	if err != nil {
 		t.Fatalf("failed to validate export: %v", err)
-	}
-
-	result, ok := resultInterface.(*ValidationResult)
-	if !ok {
-		t.Fatalf("expected *ValidationResult, got %T", resultInterface)
 	}
 
 	if !result.IsComplete {
@@ -447,16 +427,11 @@ func TestRepository_Validate_Incomplete(t *testing.T) {
 	}
 
 	// Validate
-	resultInterface, err := repo.Validate(ctx, exportDir)
+	result, err := repo.Validate(ctx, exportDir)
 
 	// Should return ErrExportIncomplete
 	if err != domainExport.ErrExportIncomplete {
 		t.Errorf("expected ErrExportIncomplete, got %v", err)
-	}
-
-	result, ok := resultInterface.(*ValidationResult)
-	if !ok {
-		t.Fatalf("expected *ValidationResult, got %T", resultInterface)
 	}
 
 	if result.IsComplete {

@@ -11,7 +11,6 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	domainExport "github.com/altuslabsxyz/devnet-builder/internal/domain/export"
-	infraExport "github.com/altuslabsxyz/devnet-builder/internal/infrastructure/export"
 	"github.com/altuslabsxyz/devnet-builder/types"
 )
 
@@ -83,23 +82,23 @@ func (m *mockNodeRepository) Delete(ctx context.Context, homeDir string, index i
 }
 
 type mockExportRepository struct {
-	saveFunc          func(ctx context.Context, export interface{}) error
-	listForDevnetFunc func(ctx context.Context, homeDir string) (interface{}, error)
-	validateFunc      func(ctx context.Context, exportPath string) (interface{}, error)
+	saveFunc          func(ctx context.Context, export *domainExport.Export) error
+	listForDevnetFunc func(ctx context.Context, homeDir string) ([]*domainExport.Export, error)
+	validateFunc      func(ctx context.Context, exportPath string) (*ports.ExportValidationResult, error)
 }
 
-func (m *mockExportRepository) Save(ctx context.Context, export interface{}) error {
+func (m *mockExportRepository) Save(ctx context.Context, export *domainExport.Export) error {
 	if m.saveFunc != nil {
 		return m.saveFunc(ctx, export)
 	}
 	return nil
 }
 
-func (m *mockExportRepository) Load(ctx context.Context, exportPath string) (interface{}, error) {
+func (m *mockExportRepository) Load(ctx context.Context, exportPath string) (*domainExport.Export, error) {
 	return nil, nil
 }
 
-func (m *mockExportRepository) ListForDevnet(ctx context.Context, homeDir string) (interface{}, error) {
+func (m *mockExportRepository) ListForDevnet(ctx context.Context, homeDir string) ([]*domainExport.Export, error) {
 	if m.listForDevnetFunc != nil {
 		return m.listForDevnetFunc(ctx, homeDir)
 	}
@@ -110,11 +109,11 @@ func (m *mockExportRepository) Delete(ctx context.Context, exportPath string) er
 	return nil
 }
 
-func (m *mockExportRepository) Validate(ctx context.Context, exportPath string) (interface{}, error) {
+func (m *mockExportRepository) Validate(ctx context.Context, exportPath string) (*ports.ExportValidationResult, error) {
 	if m.validateFunc != nil {
 		return m.validateFunc(ctx, exportPath)
 	}
-	return &infraExport.ValidationResult{
+	return &ports.ExportValidationResult{
 		IsComplete: true,
 	}, nil
 }
@@ -280,7 +279,7 @@ func TestExportUseCase_Execute_DevnetNotRunning(t *testing.T) {
 
 func TestExportUseCase_List_Success(t *testing.T) {
 	exportRepo := &mockExportRepository{
-		listForDevnetFunc: func(ctx context.Context, homeDir string) (interface{}, error) {
+		listForDevnetFunc: func(ctx context.Context, homeDir string) ([]*domainExport.Export, error) {
 			return []*domainExport.Export{}, nil
 		},
 	}
@@ -304,7 +303,7 @@ func TestExportUseCase_List_Success(t *testing.T) {
 
 func TestExportUseCase_List_RepositoryFailure(t *testing.T) {
 	exportRepo := &mockExportRepository{
-		listForDevnetFunc: func(ctx context.Context, homeDir string) (interface{}, error) {
+		listForDevnetFunc: func(ctx context.Context, homeDir string) ([]*domainExport.Export, error) {
 			return nil, errors.New("repository error")
 		},
 	}
@@ -315,23 +314,6 @@ func TestExportUseCase_List_RepositoryFailure(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected error for repository failure")
-	}
-}
-
-func TestExportUseCase_List_InvalidType(t *testing.T) {
-	exportRepo := &mockExportRepository{
-		listForDevnetFunc: func(ctx context.Context, homeDir string) (interface{}, error) {
-			// Return wrong type
-			return "invalid", nil
-		},
-	}
-
-	uc := NewExportUseCase(context.Background(), &mockDevnetRepository{}, &mockNodeRepository{}, exportRepo, &mockNodeLifecycleManager{}, &mockLogger{})
-
-	_, err := uc.List(context.Background(), "/tmp/test-devnet")
-
-	if err == nil {
-		t.Fatal("expected error for invalid type")
 	}
 }
 
@@ -365,8 +347,8 @@ func TestExportUseCase_Inspect_Success(t *testing.T) {
 	)
 
 	exportRepo := &mockExportRepository{
-		validateFunc: func(ctx context.Context, exportPath string) (interface{}, error) {
-			return &infraExport.ValidationResult{
+		validateFunc: func(ctx context.Context, exportPath string) (*ports.ExportValidationResult, error) {
+			return &ports.ExportValidationResult{
 				Export:       export,
 				IsComplete:   true,
 				MissingFiles: []string{},
@@ -393,7 +375,7 @@ func TestExportUseCase_Inspect_Success(t *testing.T) {
 
 func TestExportUseCase_Inspect_ValidationFailure(t *testing.T) {
 	exportRepo := &mockExportRepository{
-		validateFunc: func(ctx context.Context, exportPath string) (interface{}, error) {
+		validateFunc: func(ctx context.Context, exportPath string) (*ports.ExportValidationResult, error) {
 			return nil, errors.New("validation error")
 		},
 	}
@@ -436,8 +418,8 @@ func TestExportUseCase_Inspect_IncompleteExport(t *testing.T) {
 	)
 
 	exportRepo := &mockExportRepository{
-		validateFunc: func(ctx context.Context, exportPath string) (interface{}, error) {
-			return &infraExport.ValidationResult{
+		validateFunc: func(ctx context.Context, exportPath string) (*ports.ExportValidationResult, error) {
+			return &ports.ExportValidationResult{
 				Export:       export,
 				IsComplete:   false,
 				MissingFiles: []string{"genesis.json"},
@@ -460,23 +442,6 @@ func TestExportUseCase_Inspect_IncompleteExport(t *testing.T) {
 
 	if len(output.MissingFiles) != 1 {
 		t.Errorf("expected 1 missing file, got %d", len(output.MissingFiles))
-	}
-}
-
-func TestExportUseCase_Inspect_InvalidType(t *testing.T) {
-	exportRepo := &mockExportRepository{
-		validateFunc: func(ctx context.Context, exportPath string) (interface{}, error) {
-			// Return wrong type
-			return "invalid", nil
-		},
-	}
-
-	uc := NewExportUseCase(context.Background(), &mockDevnetRepository{}, &mockNodeRepository{}, exportRepo, &mockNodeLifecycleManager{}, &mockLogger{})
-
-	_, err := uc.Inspect(context.Background(), "/tmp/exports/invalid")
-
-	if err == nil {
-		t.Fatal("expected error for invalid type")
 	}
 }
 

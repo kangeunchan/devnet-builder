@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	domainExport "github.com/altuslabsxyz/devnet-builder/internal/domain/export"
 	"github.com/altuslabsxyz/devnet-builder/internal/paths"
 	"github.com/altuslabsxyz/devnet-builder/types"
@@ -27,16 +28,15 @@ func NewRepository(baseDir string) *Repository {
 }
 
 // Save persists export metadata to disk.
-func (r *Repository) Save(ctx context.Context, exp interface{}) error {
-	export, ok := exp.(*domainExport.Export)
-	if !ok {
-		return fmt.Errorf("expected *export.Export, got %T", exp)
-	}
-
+func (r *Repository) Save(ctx context.Context, export *domainExport.Export) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
+	}
+
+	if export == nil {
+		return fmt.Errorf("export cannot be nil")
 	}
 
 	// Validate export before saving
@@ -65,7 +65,7 @@ func (r *Repository) Save(ctx context.Context, exp interface{}) error {
 }
 
 // Load retrieves export metadata from a directory.
-func (r *Repository) Load(ctx context.Context, exportPath string) (interface{}, error) {
+func (r *Repository) Load(ctx context.Context, exportPath string) (*domainExport.Export, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -126,7 +126,7 @@ func (r *Repository) Load(ctx context.Context, exportPath string) (interface{}, 
 }
 
 // ListForDevnet lists all exports for a given devnet home directory.
-func (r *Repository) ListForDevnet(ctx context.Context, devnetHomeDir string) (interface{}, error) {
+func (r *Repository) ListForDevnet(ctx context.Context, devnetHomeDir string) ([]*domainExport.Export, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -163,13 +163,7 @@ func (r *Repository) ListForDevnet(ctx context.Context, devnetHomeDir string) (i
 			// Skip invalid exports
 			continue
 		}
-
-		export, ok := exp.(*domainExport.Export)
-		if !ok {
-			continue
-		}
-
-		exports = append(exports, export)
+		exports = append(exports, exp)
 	}
 
 	// Sort by timestamp (newest first)
@@ -209,7 +203,7 @@ func (r *Repository) Delete(ctx context.Context, exportPath string) error {
 }
 
 // Validate checks if an export is complete and valid.
-func (r *Repository) Validate(ctx context.Context, exportPath string) (interface{}, error) {
+func (r *Repository) Validate(ctx context.Context, exportPath string) (*ports.ExportValidationResult, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -221,11 +215,7 @@ func (r *Repository) Validate(ctx context.Context, exportPath string) (interface
 	if err != nil {
 		return nil, err
 	}
-
-	export, ok := exp.(*domainExport.Export)
-	if !ok {
-		return nil, fmt.Errorf("invalid export type")
-	}
+	export := exp
 
 	// Check completeness
 	var missingFiles []string
@@ -241,7 +231,7 @@ func (r *Repository) Validate(ctx context.Context, exportPath string) (interface
 		missingFiles = append(missingFiles, filepath.Base(export.GenesisFilePath))
 	}
 
-	result := &ValidationResult{
+	result := &ports.ExportValidationResult{
 		Export:       export,
 		IsComplete:   len(missingFiles) == 0,
 		MissingFiles: missingFiles,
@@ -252,13 +242,6 @@ func (r *Repository) Validate(ctx context.Context, exportPath string) (interface
 	}
 
 	return result, nil
-}
-
-// ValidationResult contains the result of export validation.
-type ValidationResult struct {
-	Export       *domainExport.Export
-	IsComplete   bool
-	MissingFiles []string
 }
 
 // GetExportsDirectory returns the exports directory path for a devnet.
