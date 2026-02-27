@@ -17,8 +17,8 @@ func TestRenderPlist(t *testing.T) {
 		Command:          []string{"/usr/bin/stabled", "start", "--home", "/data/node0"},
 		WorkingDirectory: "/data/node0",
 		Environment: map[string]string{
-			"HOME":   "/data/node0",
-			"MYVAR":  "myval",
+			"HOME":  "/data/node0",
+			"MYVAR": "myval",
 		},
 		StdoutPath:       "/var/log/testnode.log",
 		StderrPath:       "/var/log/testnode.err",
