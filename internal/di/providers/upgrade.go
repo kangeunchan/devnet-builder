@@ -2,7 +2,6 @@ package providers
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"github.com/altuslabsxyz/devnet-builder/internal/application/dto"
@@ -160,12 +159,23 @@ type exportUseCaseAdapter struct {
 	}
 }
 
-func (a *exportUseCaseAdapter) Execute(ctx context.Context, input interface{}) (interface{}, error) {
-	exportInput, ok := input.(dto.ExportInput)
-	if !ok {
-		return nil, fmt.Errorf("invalid input type for export: expected dto.ExportInput, got %T", input)
+func (a *exportUseCaseAdapter) Execute(ctx context.Context, input ports.ExportExecuteInput) (*ports.ExportExecuteOutput, error) {
+	result, err := a.concrete.Execute(ctx, dto.ExportInput{
+		HomeDir:   input.HomeDir,
+		OutputDir: input.OutputDir,
+		Force:     input.Force,
+	})
+	if err != nil {
+		return nil, err
 	}
-	return a.concrete.Execute(ctx, exportInput)
+	return &ports.ExportExecuteOutput{
+		ExportPath:   result.ExportPath,
+		BlockHeight:  result.BlockHeight,
+		GenesisPath:  result.GenesisPath,
+		MetadataPath: result.MetadataPath,
+		WasRunning:   result.WasRunning,
+		Warnings:     result.Warnings,
+	}, nil
 }
 
 // StateManager returns the upgrade state manager (lazy init).

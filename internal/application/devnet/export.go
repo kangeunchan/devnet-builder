@@ -270,14 +270,9 @@ func (uc *ExportUseCase) Execute(ctx context.Context, input dto.ExportInput) (*d
 // List returns all exports for a devnet.
 func (uc *ExportUseCase) List(ctx context.Context, homeDir string) (*dto.ExportListOutput, error) {
 	// Load all exports
-	exportsInterface, err := uc.exportRepo.ListForDevnet(ctx, homeDir)
+	exports, err := uc.exportRepo.ListForDevnet(ctx, homeDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list exports: %w", err)
-	}
-
-	exports, ok := exportsInterface.([]*domainExport.Export)
-	if !ok {
-		return nil, fmt.Errorf("invalid export list type")
 	}
 
 	// Build summaries
@@ -314,14 +309,9 @@ func (uc *ExportUseCase) List(ctx context.Context, homeDir string) (*dto.ExportL
 // Inspect returns detailed information about a specific export.
 func (uc *ExportUseCase) Inspect(ctx context.Context, exportPath string) (*dto.ExportInspectOutput, error) {
 	// Validate export
-	resultInterface, err := uc.exportRepo.Validate(ctx, exportPath)
+	result, err := uc.exportRepo.Validate(ctx, exportPath)
 	if err != nil && err != domainExport.ErrExportIncomplete {
 		return nil, fmt.Errorf("failed to validate export: %w", err)
-	}
-
-	result, ok := resultInterface.(*infraExport.ValidationResult)
-	if !ok {
-		return nil, fmt.Errorf("invalid validation result type")
 	}
 
 	// Calculate directory size

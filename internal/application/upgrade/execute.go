@@ -115,21 +115,16 @@ func (uc *ExecuteUpgradeUseCase) executeWithGov(ctx context.Context, input dto.E
 	// Pre-upgrade export (if enabled)
 	if input.WithExport {
 		uc.logger.Info("Pre-upgrade: Exporting state before upgrade...")
-		exportInput := dto.ExportInput{
+		exportInput := ports.ExportExecuteInput{
 			HomeDir:   input.HomeDir,
 			OutputDir: input.GenesisDir,
 			Force:     false,
 		}
 
-		preExportResultRaw, err := uc.exportUC.Execute(ctx, exportInput)
+		preExportResult, err := uc.exportUC.Execute(ctx, exportInput)
 		if err != nil {
 			uc.logger.Error("Pre-upgrade export failed: %v", err)
 			output.Error = fmt.Errorf("pre-upgrade export failed: %w", err)
-			return output, output.Error
-		}
-		preExportResult, ok := preExportResultRaw.(*dto.ExportOutput)
-		if !ok {
-			output.Error = fmt.Errorf("invalid export result type")
 			return output, output.Error
 		}
 		output.PreGenesisPath = preExportResult.ExportPath
@@ -214,25 +209,20 @@ func (uc *ExecuteUpgradeUseCase) executeWithGov(ctx context.Context, input dto.E
 	// Post-upgrade export (if enabled)
 	if input.WithExport {
 		uc.logger.Info("Post-upgrade: Exporting state after upgrade...")
-		exportInput := dto.ExportInput{
+		exportInput := ports.ExportExecuteInput{
 			HomeDir:   input.HomeDir,
 			OutputDir: input.GenesisDir,
 			Force:     false,
 		}
 
-		postExportResultRaw, err := uc.exportUC.Execute(ctx, exportInput)
+		postExportResult, err := uc.exportUC.Execute(ctx, exportInput)
 		if err != nil {
 			// Post-upgrade export failure is non-fatal (upgrade already complete)
 			uc.logger.Warn("Post-upgrade export failed: %v", err)
 			uc.logger.Warn("Upgrade completed successfully, but post-upgrade state export failed")
 		} else {
-			postExportResult, ok := postExportResultRaw.(*dto.ExportOutput)
-			if ok {
-				output.PostGenesisPath = postExportResult.ExportPath
-				uc.logger.Success("Post-upgrade export complete: %s", postExportResult.ExportPath)
-			} else {
-				uc.logger.Warn("Invalid export result type for post-upgrade export")
-			}
+			output.PostGenesisPath = postExportResult.ExportPath
+			uc.logger.Success("Post-upgrade export complete: %s", postExportResult.ExportPath)
 		}
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	domainExport "github.com/altuslabsxyz/devnet-builder/internal/domain/export"
 	"github.com/altuslabsxyz/devnet-builder/types"
 )
 
@@ -190,17 +191,24 @@ type NodeConfigOptions struct {
 // ExportRepository manages export persistence and querying
 type ExportRepository interface {
 	// Save saves export metadata to disk
-	Save(ctx context.Context, exp interface{}) error
+	Save(ctx context.Context, exp *domainExport.Export) error
 
 	// Load loads export from directory
-	Load(ctx context.Context, exportPath string) (interface{}, error)
+	Load(ctx context.Context, exportPath string) (*domainExport.Export, error)
 
 	// ListForDevnet lists all exports for a devnet
-	ListForDevnet(ctx context.Context, devnetHomeDir string) (interface{}, error)
+	ListForDevnet(ctx context.Context, devnetHomeDir string) ([]*domainExport.Export, error)
 
 	// Delete removes an export directory
 	Delete(ctx context.Context, exportPath string) error
 
 	// Validate checks export completeness
-	Validate(ctx context.Context, exportPath string) (interface{}, error)
+	Validate(ctx context.Context, exportPath string) (*ExportValidationResult, error)
+}
+
+// ExportValidationResult is the typed validation result returned by ExportRepository.
+type ExportValidationResult struct {
+	Export       *domainExport.Export
+	IsComplete   bool
+	MissingFiles []string
 }

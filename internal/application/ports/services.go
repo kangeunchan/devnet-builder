@@ -228,12 +228,26 @@ const (
 	StageFailed          UpgradeStage = "failed"
 )
 
+// ExportExecuteInput is the boundary DTO for export requests.
+type ExportExecuteInput struct {
+	HomeDir   string
+	OutputDir string
+	Force     bool
+}
+
+// ExportExecuteOutput is the boundary DTO for export responses.
+type ExportExecuteOutput struct {
+	ExportPath   string
+	BlockHeight  int64
+	GenesisPath  string
+	MetadataPath string
+	WasRunning   bool
+	Warnings     []string
+}
+
 // ExportUseCase defines the interface for exporting blockchain state.
-// Note: Uses dto.ExportInput and dto.ExportOutput from internal/application/dto
 type ExportUseCase interface {
-	// Execute performs a state export
-	// Returns export result with paths and metadata
-	Execute(ctx context.Context, input interface{}) (interface{}, error)
+	Execute(ctx context.Context, input ExportExecuteInput) (*ExportExecuteOutput, error)
 }
 
 // NodeLifecycleManager defines operations for managing node lifecycle.

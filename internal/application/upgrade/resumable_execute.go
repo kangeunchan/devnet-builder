@@ -178,22 +178,20 @@ func (uc *ResumableExecuteUpgradeUseCase) executeWithGovResumable(
 	// Pre-upgrade export (only if starting fresh and enabled)
 	if state.Stage == ports.ResumableStageInitialized && input.WithExport {
 		uc.logger.Info("Pre-upgrade: Exporting state before upgrade...")
-		exportInput := dto.ExportInput{
+		exportInput := ports.ExportExecuteInput{
 			HomeDir:   input.HomeDir,
 			OutputDir: input.GenesisDir,
 			Force:     false,
 		}
 
-		preExportResultRaw, err := uc.exportUC.Execute(ctx, exportInput)
+		preExportResult, err := uc.exportUC.Execute(ctx, exportInput)
 		if err != nil {
 			uc.logger.Error("Pre-upgrade export failed: %v", err)
 			output.Error = fmt.Errorf("pre-upgrade export failed: %w", err)
 			return output, output.Error
 		}
-		if preExportResult, ok := preExportResultRaw.(*dto.ExportOutput); ok {
-			output.PreGenesisPath = preExportResult.ExportPath
-			uc.logger.Success("Pre-upgrade export complete: %s", preExportResult.ExportPath)
-		}
+		output.PreGenesisPath = preExportResult.ExportPath
+		uc.logger.Success("Pre-upgrade export complete: %s", preExportResult.ExportPath)
 	}
 
 	// Resume from current stage
@@ -345,16 +343,16 @@ func (uc *ResumableExecuteUpgradeUseCase) executeWithGovResumable(
 		// Post-upgrade export (if enabled)
 		if input.WithExport {
 			uc.logger.Info("Post-upgrade: Exporting state after upgrade...")
-			exportInput := dto.ExportInput{
+			exportInput := ports.ExportExecuteInput{
 				HomeDir:   input.HomeDir,
 				OutputDir: input.GenesisDir,
 				Force:     false,
 			}
 
-			postExportResultRaw, err := uc.exportUC.Execute(ctx, exportInput)
+			postExportResult, err := uc.exportUC.Execute(ctx, exportInput)
 			if err != nil {
 				uc.logger.Warn("Post-upgrade export failed: %v", err)
-			} else if postExportResult, ok := postExportResultRaw.(*dto.ExportOutput); ok {
+			} else {
 				output.PostGenesisPath = postExportResult.ExportPath
 				uc.logger.Success("Post-upgrade export complete: %s", postExportResult.ExportPath)
 			}
