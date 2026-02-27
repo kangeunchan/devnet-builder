@@ -13,6 +13,7 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/domain/ports"
 	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/node"
 	"github.com/altuslabsxyz/devnet-builder/internal/output"
+	"go.uber.org/multierr"
 )
 
 // OrchestratorImpl implements the DeploymentOrchestrator interface
@@ -121,7 +122,7 @@ func (o *OrchestratorImpl) Rollback(ctx context.Context, state *ports.Deployment
 	state.Phase = ports.PhaseRollingBack
 	o.logger.Info("Rolling back deployment for %s", state.DevnetName)
 
-	var errs []error
+	var errs error
 
 	// Step 1: Stop all started containers
 	for _, containerID := range state.StartedContainers {
@@ -129,7 +130,7 @@ func (o *OrchestratorImpl) Rollback(ctx context.Context, state *ports.Deployment
 		cmd := exec.CommandContext(ctx, "docker", "stop", "-t", "5", containerID)
 		if err := cmd.Run(); err != nil {
 			o.logger.Warn("Failed to stop container %s: %v", containerID, err)
-			errs = append(errs, fmt.Errorf("stop container %s: %w", containerID, err))
+			errs = multierr.Append(errs, fmt.Errorf("stop container %s: %w", containerID, err))
 		}
 	}
 
@@ -139,7 +140,7 @@ func (o *OrchestratorImpl) Rollback(ctx context.Context, state *ports.Deployment
 		cmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
 		if err := cmd.Run(); err != nil {
 			o.logger.Warn("Failed to remove container %s: %v", containerID, err)
-			errs = append(errs, fmt.Errorf("remove container %s: %w", containerID, err))
+			errs = multierr.Append(errs, fmt.Errorf("remove container %s: %w", containerID, err))
 		}
 	}
 
@@ -148,7 +149,7 @@ func (o *OrchestratorImpl) Rollback(ctx context.Context, state *ports.Deployment
 		o.logger.Debug("Deleting network %s", *state.NetworkID)
 		if err := o.networkManager.DeleteNetwork(ctx, *state.NetworkID); err != nil {
 			o.logger.Warn("Failed to delete network %s: %v", *state.NetworkID, err)
-			errs = append(errs, fmt.Errorf("delete network %s: %w", *state.NetworkID, err))
+			errs = multierr.Append(errs, fmt.Errorf("delete network %s: %w", *state.NetworkID, err))
 		}
 	}
 
@@ -157,12 +158,12 @@ func (o *OrchestratorImpl) Rollback(ctx context.Context, state *ports.Deployment
 		o.logger.Debug("Releasing port allocation for %s", state.DevnetName)
 		if err := o.portAllocator.ReleaseRange(ctx, state.DevnetName); err != nil {
 			o.logger.Warn("Failed to release ports for %s: %v", state.DevnetName, err)
-			errs = append(errs, fmt.Errorf("release ports: %w", err))
+			errs = multierr.Append(errs, fmt.Errorf("release ports for %s: %w", state.DevnetName, err))
 		}
 	}
 
-	if len(errs) > 0 {
-		return &MultiError{Errors: errs}
+	if errs != nil {
+		return fmt.Errorf("rollback encountered one or more errors for %s: %w", state.DevnetName, errs)
 	}
 
 	// Clean up state file after successful rollback
@@ -551,22 +552,9 @@ func (o *OrchestratorImpl) handleFailure(ctx context.Context, state *ports.Deplo
 
 	if rollbackErr := o.Rollback(ctx, state); rollbackErr != nil {
 		o.logger.Error("Rollback also failed: %v", rollbackErr)
-		return fmt.Errorf("deployment failed: %w (rollback also failed: %v)", err, rollbackErr)
+		return fmt.Errorf("deployment failed: %w; rollback also failed: %w", err, rollbackErr)
 	}
 
 	state.Phase = ports.PhaseFailed
 	return fmt.Errorf("deployment failed: %w", err)
-}
-
-// MultiError represents multiple errors
-type MultiError struct {
-	Errors []error
-}
-
-func (m *MultiError) Error() string {
-	var msgs []string
-	for _, err := range m.Errors {
-		msgs = append(msgs, err.Error())
-	}
-	return fmt.Sprintf("multiple errors: %s", strings.Join(msgs, "; "))
 }
