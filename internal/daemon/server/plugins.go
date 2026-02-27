@@ -13,8 +13,9 @@ import (
 
 // PluginManager handles plugin discovery, loading, and registration.
 type PluginManager struct {
-	loader *plugin.Loader
-	logger *slog.Logger
+	loader   *plugin.Loader
+	logger   *slog.Logger
+	registry network.Registry
 }
 
 // PluginManagerConfig configures the PluginManager.
@@ -25,6 +26,10 @@ type PluginManagerConfig struct {
 
 	// Logger for logging plugin operations.
 	Logger *slog.Logger
+
+	// NetworkRegistry receives discovered plugin modules.
+	// If nil, the package-global registry is used for backward compatibility.
+	NetworkRegistry network.Registry
 }
 
 // NewPluginManager creates a new PluginManager.
@@ -32,6 +37,10 @@ func NewPluginManager(config PluginManagerConfig) *PluginManager {
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	registry := config.NetworkRegistry
+	if registry == nil {
+		registry = network.GlobalRegistry()
 	}
 
 	// Create hashicorp logger adapter
@@ -49,8 +58,9 @@ func NewPluginManager(config PluginManagerConfig) *PluginManager {
 	}
 
 	return &PluginManager{
-		loader: plugin.NewLoader(opts...),
-		logger: logger,
+		loader:   plugin.NewLoader(opts...),
+		logger:   logger,
+		registry: registry,
 	}
 }
 
@@ -69,7 +79,7 @@ type PluginLoadError struct {
 	Error error
 }
 
-// LoadAndRegister discovers plugins, loads them, and registers them with the global network registry.
+// LoadAndRegister discovers plugins, loads them, and registers them with the injected network registry.
 // Returns the load results including any errors encountered.
 func (pm *PluginManager) LoadAndRegister() (*LoadResult, error) {
 	result := &LoadResult{
@@ -91,7 +101,7 @@ func (pm *PluginManager) LoadAndRegister() (*LoadResult, error) {
 
 	pm.logger.Info("discovered plugins", "count", len(discovered), "plugins", discovered)
 
-	// Load each plugin and register with global registry
+	// Load each plugin and register with injected registry
 	for _, name := range discovered {
 		if err := pm.loadAndRegisterPlugin(name); err != nil {
 			pm.logger.Warn("failed to load plugin",
@@ -111,7 +121,7 @@ func (pm *PluginManager) LoadAndRegister() (*LoadResult, error) {
 	return result, nil
 }
 
-// loadAndRegisterPlugin loads a single plugin and registers it with the global registry.
+// loadAndRegisterPlugin loads a single plugin and registers it with the injected registry.
 func (pm *PluginManager) loadAndRegisterPlugin(name string) error {
 	// Load the plugin
 	client, err := pm.loader.Load(name)
@@ -125,8 +135,8 @@ func (pm *PluginManager) loadAndRegisterPlugin(name string) error {
 	// Wrap with adapter to convert pkg/network.Module to internal/network.NetworkModule
 	adapter := network.NewPluginAdapter(module)
 
-	// Register with global registry
-	if err := network.MustRegister(adapter, false); err != nil {
+	// Register with injected registry
+	if err := pm.registry.MustRegister(adapter, false); err != nil {
 		return fmt.Errorf("failed to register plugin module: %w", err)
 	}
 
@@ -157,11 +167,11 @@ func (pm *PluginManager) Reload(name string) error {
 	// Wrap with adapter
 	adapter := network.NewPluginAdapter(module)
 
-	// Re-register with global registry
+	// Re-register with injected registry
 	// Note: The registry doesn't support re-registration, so this may fail
 	// if the module was previously registered. In production, you'd want
 	// a mechanism to update existing registrations.
-	if err := network.MustRegister(adapter, false); err != nil {
+	if err := pm.registry.MustRegister(adapter, false); err != nil {
 		pm.logger.Warn("plugin reloaded but registry update failed (already registered)",
 			"plugin", name,
 			"error", err)

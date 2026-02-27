@@ -26,6 +26,7 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/daemon/subnet"
 	"github.com/altuslabsxyz/devnet-builder/internal/daemon/types"
 	"github.com/altuslabsxyz/devnet-builder/internal/daemon/upgrader"
+	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/network"
 	"google.golang.org/grpc"
 )
 
@@ -93,6 +94,7 @@ type Server struct {
 	manager         *controller.Manager
 	healthCtrl      *controller.HealthController
 	pluginManager   *PluginManager
+	networkRegistry network.Registry
 	subnetAllocator *subnet.Allocator
 	nodeRuntime     runtime.NodeRuntime // Node runtime for process management
 	grpcServer      *grpc.Server
@@ -136,12 +138,15 @@ func New(config *Config) (*Server, error) {
 	multiWriter := io.MultiWriter(os.Stdout, logFile)
 	logger := slog.New(slog.NewTextHandler(multiWriter, &slog.HandlerOptions{Level: level}))
 
+	networkRegistry := network.NewRegistry()
+
 	// Load network plugins from plugin directories
 	// Plugins are discovered from ~/.devnet-builder/plugins/ and registered
-	// with the global network registry so they can be queried via NetworkService
+	// with the injected network registry so they can be queried via NetworkService
 	pluginMgr := NewPluginManager(PluginManagerConfig{
-		PluginDirs: []string{filepath.Join(config.DataDir, "plugins")},
-		Logger:     logger,
+		PluginDirs:      []string{filepath.Join(config.DataDir, "plugins")},
+		Logger:          logger,
+		NetworkRegistry: networkRegistry,
 	})
 
 	result, err := pluginMgr.LoadAndRegister()
@@ -185,7 +190,7 @@ func New(config *Config) (*Server, error) {
 	mgr.SetLogger(logger)
 
 	// Create orchestrator factory for full provisioning flow (build, fork, init)
-	orchFactory := NewOrchestratorFactory(config.DataDir, logger)
+	orchFactory := NewOrchestratorFactory(config.DataDir, logger, networkRegistry)
 
 	// Create devnet provisioner with orchestrator factory and subnet allocator
 	// The factory enables full provisioning (build, fork, init) before creating Node resources
@@ -324,7 +329,7 @@ func New(config *Config) (*Server, error) {
 
 	// Create network service first (needed by ante handler)
 	githubFactory := NewDefaultGitHubClientFactory(config.DataDir, logger)
-	networkSvc := NewNetworkService(githubFactory)
+	networkSvc := NewNetworkService(githubFactory, networkRegistry)
 	networkSvc.SetLogger(logger)
 
 	// Create ante handler for request validation
@@ -364,6 +369,7 @@ func New(config *Config) (*Server, error) {
 		manager:         mgr,
 		healthCtrl:      healthCtrl,
 		pluginManager:   pluginMgr,
+		networkRegistry: networkRegistry,
 		subnetAllocator: subnetAlloc,
 		nodeRuntime:     nodeRuntime,
 		grpcServer:      grpcServer,

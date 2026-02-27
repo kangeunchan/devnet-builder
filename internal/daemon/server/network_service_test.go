@@ -52,7 +52,7 @@ func (f *mockGitHubClientFactory) CreateClient(networkName, owner, repo string) 
 
 func TestNetworkService_ListBinaryVersions_MissingNetworkName(t *testing.T) {
 	factory := &mockGitHubClientFactory{}
-	svc := NewNetworkService(factory)
+	svc := NewNetworkService(factory, network.GlobalRegistry())
 
 	_, err := svc.ListBinaryVersions(context.Background(), &v1.ListBinaryVersionsRequest{
 		NetworkName: "",
@@ -65,7 +65,7 @@ func TestNetworkService_ListBinaryVersions_MissingNetworkName(t *testing.T) {
 
 func TestNetworkService_ListBinaryVersions_NetworkNotFound(t *testing.T) {
 	factory := &mockGitHubClientFactory{}
-	svc := NewNetworkService(factory)
+	svc := NewNetworkService(factory, network.GlobalRegistry())
 
 	_, err := svc.ListBinaryVersions(context.Background(), &v1.ListBinaryVersionsRequest{
 		NetworkName: "nonexistent-network",
@@ -78,7 +78,7 @@ func TestNetworkService_ListBinaryVersions_NetworkNotFound(t *testing.T) {
 
 func TestNetworkService_ListBinaryVersions_NilFactory(t *testing.T) {
 	// Test that nil factory is handled gracefully
-	svc := NewNetworkService(nil)
+	svc := NewNetworkService(nil, network.GlobalRegistry())
 
 	// This will fail at network lookup stage for non-existent network
 	// but if we had a registered network with GitHub source, it should catch nil factory
@@ -130,7 +130,7 @@ func TestNetworkService_ListBinaryVersions_Success(t *testing.T) {
 	}
 
 	factory := &mockGitHubClientFactory{client: mockClient}
-	svc := NewNetworkService(factory)
+	svc := NewNetworkService(factory, network.GlobalRegistry())
 
 	// Test without prereleases
 	resp, err := svc.ListBinaryVersions(context.Background(), &v1.ListBinaryVersionsRequest{
@@ -182,7 +182,7 @@ func TestNetworkService_ListBinaryVersions_IncludePrerelease(t *testing.T) {
 	}
 
 	factory := &mockGitHubClientFactory{client: mockClient}
-	svc := NewNetworkService(factory)
+	svc := NewNetworkService(factory, network.GlobalRegistry())
 
 	// Test with prereleases
 	resp, err := svc.ListBinaryVersions(context.Background(), &v1.ListBinaryVersionsRequest{
@@ -209,7 +209,7 @@ func TestNetworkService_ListBinaryVersions_FetchError(t *testing.T) {
 	}
 
 	factory := &mockGitHubClientFactory{client: mockClient}
-	svc := NewNetworkService(factory)
+	svc := NewNetworkService(factory, network.GlobalRegistry())
 
 	_, err := svc.ListBinaryVersions(context.Background(), &v1.ListBinaryVersionsRequest{
 		NetworkName: testModule.Name(),
@@ -231,7 +231,7 @@ func TestNetworkService_ListBinaryVersions_EmptyReleases(t *testing.T) {
 	}
 
 	factory := &mockGitHubClientFactory{client: mockClient}
-	svc := NewNetworkService(factory)
+	svc := NewNetworkService(factory, network.GlobalRegistry())
 
 	resp, err := svc.ListBinaryVersions(context.Background(), &v1.ListBinaryVersionsRequest{
 		NetworkName: testModule.Name(),
@@ -264,7 +264,7 @@ func TestNetworkService_ListBinaryVersions_OnlyPrereleases(t *testing.T) {
 	}
 
 	factory := &mockGitHubClientFactory{client: mockClient}
-	svc := NewNetworkService(factory)
+	svc := NewNetworkService(factory, network.GlobalRegistry())
 
 	// Without prereleases - should return empty
 	resp, err := svc.ListBinaryVersions(context.Background(), &v1.ListBinaryVersionsRequest{

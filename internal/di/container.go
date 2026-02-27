@@ -114,36 +114,46 @@ type Config struct {
 
 // NetworkRegistry wraps network registration operations.
 // This provides an injectable alternative to the global registry.
-type NetworkRegistry struct{}
+type NetworkRegistry struct {
+	registry network.Registry
+}
+
+// NewNetworkRegistry creates a new wrapper for an injected network registry.
+func NewNetworkRegistry(registry network.Registry) *NetworkRegistry {
+	if registry == nil {
+		registry = network.GlobalRegistry()
+	}
+	return &NetworkRegistry{registry: registry}
+}
 
 // Get retrieves a network module by name.
 func (r *NetworkRegistry) Get(name string) (network.NetworkModule, error) {
-	return network.Get(name)
+	return r.registry.Get(name)
 }
 
 // Has checks if a network is registered.
 func (r *NetworkRegistry) Has(name string) bool {
-	return network.Has(name)
+	return r.registry.Has(name)
 }
 
 // List returns all registered network names.
 func (r *NetworkRegistry) List() []string {
-	return network.List()
+	return r.registry.List()
 }
 
 // ListModules returns all registered network modules.
 func (r *NetworkRegistry) ListModules() []network.NetworkModule {
-	return network.ListModules()
+	return r.registry.ListModules()
 }
 
 // Default returns the default network module.
 func (r *NetworkRegistry) Default() (network.NetworkModule, error) {
-	return network.Default()
+	return r.registry.Default()
 }
 
 // SetDefault changes the default network name.
 func (r *NetworkRegistry) SetDefault(name string) error {
-	return network.SetDefault(name)
+	return r.registry.SetDefault(name)
 }
 
 // Option is a function that configures the container.
@@ -317,11 +327,18 @@ func WithBinaryVersionDetector(detector ports.BinaryVersionDetector) Option {
 	}
 }
 
+// WithNetworkRegistry sets an instance-scoped network registry.
+func WithNetworkRegistry(registry network.Registry) Option {
+	return func(c *Container) {
+		c.networkReg = NewNetworkRegistry(registry)
+	}
+}
+
 // New creates a new dependency injection container with the given options.
 func New(opts ...Option) *Container {
 	c := &Container{
 		logger:     output.NewLogger(),
-		networkReg: &NetworkRegistry{},
+		networkReg: NewNetworkRegistry(network.GlobalRegistry()),
 		config:     &Config{},
 	}
 

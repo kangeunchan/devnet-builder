@@ -144,7 +144,7 @@ var _ network.NetworkModule = (*mockNetworkModule)(nil)
 
 func TestNewOrchestratorFactory(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	f := NewOrchestratorFactory("/tmp/test-data", logger)
+	f := NewOrchestratorFactory("/tmp/test-data", logger, network.NewRegistry())
 
 	require.NotNil(t, f)
 	assert.Equal(t, "/tmp/test-data", f.dataDir)
@@ -153,7 +153,7 @@ func TestNewOrchestratorFactory(t *testing.T) {
 
 func TestOrchestratorFactory_GetBuilder_UnknownNetwork(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	f := NewOrchestratorFactory("/tmp/test-data", logger)
+	f := NewOrchestratorFactory("/tmp/test-data", logger, network.NewRegistry())
 
 	// Should fail for unknown network (no plugins loaded)
 	builder, err := f.GetBuilder("nonexistent-network")
@@ -163,7 +163,7 @@ func TestOrchestratorFactory_GetBuilder_UnknownNetwork(t *testing.T) {
 
 func TestOrchestratorFactory_GetPluginRuntime_UnknownNetwork(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	f := NewOrchestratorFactory("/tmp/test-data", logger)
+	f := NewOrchestratorFactory("/tmp/test-data", logger, network.NewRegistry())
 
 	// Should fail for unknown network
 	pr, err := f.GetPluginRuntime("nonexistent-network")
@@ -173,7 +173,7 @@ func TestOrchestratorFactory_GetPluginRuntime_UnknownNetwork(t *testing.T) {
 
 func TestOrchestratorFactory_CreateOrchestrator_UnknownNetwork(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	f := NewOrchestratorFactory("/tmp/test-data", logger)
+	f := NewOrchestratorFactory("/tmp/test-data", logger, network.NewRegistry())
 
 	// Should fail for unknown network
 	orch, err := f.CreateOrchestrator("nonexistent-network")
@@ -183,7 +183,7 @@ func TestOrchestratorFactory_CreateOrchestrator_UnknownNetwork(t *testing.T) {
 
 func TestOrchestratorFactory_ListAvailableNetworks_Empty(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	f := NewOrchestratorFactory("/tmp/test-data", logger)
+	f := NewOrchestratorFactory("/tmp/test-data", logger, network.NewRegistry())
 
 	// Should return empty list when no plugins are loaded
 	networks := f.ListAvailableNetworks()

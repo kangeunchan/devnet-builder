@@ -10,7 +10,6 @@ import (
 	"github.com/altuslabsxyz/devnet-builder/internal/application/ports"
 	"github.com/altuslabsxyz/devnet-builder/internal/application/upgrade"
 	"github.com/altuslabsxyz/devnet-builder/internal/di/providers"
-	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/network"
 	"github.com/altuslabsxyz/devnet-builder/internal/infrastructure/plugin"
 	"github.com/altuslabsxyz/devnet-builder/internal/output"
 )
@@ -76,11 +75,18 @@ func WithInfrastructureV2(infra providers.InfrastructureProvider) OptionV2 {
 	}
 }
 
+// WithNetworkRegistryV2 sets an instance-scoped network registry wrapper.
+func WithNetworkRegistryV2(registry *NetworkRegistry) OptionV2 {
+	return func(c *ContainerV2) {
+		c.networkReg = registry
+	}
+}
+
 // NewV2 creates a new ContainerV2 with the given options.
 func NewV2(opts ...OptionV2) *ContainerV2 {
 	c := &ContainerV2{
 		logger:     output.NewLogger(),
-		networkReg: &NetworkRegistry{},
+		networkReg: NewNetworkRegistry(nil),
 		config:     &Config{},
 	}
 
@@ -430,44 +436,6 @@ func (c *ContainerV2) SetBinaryResolver(resolver ports.BinaryResolver) {
 	// This method exists for backward compatibility but is a no-op in V2
 	c.logger.Warn("SetBinaryResolver called on ContainerV2 - this is deprecated. " +
 		"Set the binary resolver when creating the InfrastructureProvider instead.")
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// NetworkRegistry Wrapper (unchanged from original)
-// ─────────────────────────────────────────────────────────────────────────────
-
-// NetworkRegistryV2 wraps network registration operations.
-// This provides an injectable alternative to the global registry.
-type NetworkRegistryV2 struct{}
-
-// Get retrieves a network module by name.
-func (r *NetworkRegistryV2) Get(name string) (network.NetworkModule, error) {
-	return network.Get(name)
-}
-
-// Has checks if a network is registered.
-func (r *NetworkRegistryV2) Has(name string) bool {
-	return network.Has(name)
-}
-
-// List returns all registered network names.
-func (r *NetworkRegistryV2) List() []string {
-	return network.List()
-}
-
-// ListModules returns all registered network modules.
-func (r *NetworkRegistryV2) ListModules() []network.NetworkModule {
-	return network.ListModules()
-}
-
-// Default returns the default network module.
-func (r *NetworkRegistryV2) Default() (network.NetworkModule, error) {
-	return network.Default()
-}
-
-// SetDefault changes the default network name.
-func (r *NetworkRegistryV2) SetDefault(name string) error {
-	return network.SetDefault(name)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

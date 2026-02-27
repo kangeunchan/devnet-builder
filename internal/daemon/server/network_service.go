@@ -16,13 +16,18 @@ type NetworkService struct {
 	v1.UnimplementedNetworkServiceServer
 	githubFactory GitHubClientFactory
 	logger        *slog.Logger
+	registry      network.Registry
 }
 
 // NewNetworkService creates a new NetworkService.
-func NewNetworkService(githubFactory GitHubClientFactory) *NetworkService {
+func NewNetworkService(githubFactory GitHubClientFactory, registry network.Registry) *NetworkService {
+	if registry == nil {
+		registry = network.GlobalRegistry()
+	}
 	return &NetworkService{
 		githubFactory: githubFactory,
 		logger:        slog.Default(),
+		registry:      registry,
 	}
 }
 
@@ -33,7 +38,7 @@ func (s *NetworkService) SetLogger(logger *slog.Logger) {
 
 // ListNetworks returns all registered network modules.
 func (s *NetworkService) ListNetworks(ctx context.Context, req *v1.ListNetworksRequest) (*v1.ListNetworksResponse, error) {
-	modules := network.ListModules()
+	modules := s.registry.ListModules()
 
 	summaries := make([]*v1.NetworkSummary, 0, len(modules))
 	for _, module := range modules {
@@ -51,7 +56,7 @@ func (s *NetworkService) GetNetworkInfo(ctx context.Context, req *v1.GetNetworkI
 		return nil, status.Error(codes.InvalidArgument, "name is required")
 	}
 
-	module, err := network.Get(req.Name)
+	module, err := s.registry.Get(req.Name)
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "network %q not found: %v", req.Name, err)
 	}
@@ -129,7 +134,7 @@ func (s *NetworkService) ListBinaryVersions(ctx context.Context, req *v1.ListBin
 	}
 
 	// Get network module
-	module, err := network.Get(req.NetworkName)
+	module, err := s.registry.Get(req.NetworkName)
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "network %q not found: %v", req.NetworkName, err)
 	}

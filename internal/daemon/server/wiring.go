@@ -1,7 +1,7 @@
 // internal/daemon/server/wiring.go
 // Package server provides wiring for the daemon server.
 // This file contains dependency injection for the provisioning system,
-// using NetworkModule from the global registry (populated by loaded plugins).
+// using NetworkModule from an injected registry (populated by loaded plugins).
 package server
 
 import (
@@ -721,23 +721,28 @@ func (a *nodeInitializerAdapter) GetTestMnemonic(validatorIndex int) string {
 // =============================================================================
 
 // OrchestratorFactory creates orchestrators for the daemon.
-// It uses the global network registry to obtain NetworkModules from loaded plugins.
+// It uses an injected network registry to obtain NetworkModules from loaded plugins.
 type OrchestratorFactory struct {
-	dataDir string
-	logger  *slog.Logger
+	dataDir  string
+	logger   *slog.Logger
+	registry network.Registry
 }
 
 // NewOrchestratorFactory creates a new orchestrator factory.
-func NewOrchestratorFactory(dataDir string, logger *slog.Logger) *OrchestratorFactory {
+func NewOrchestratorFactory(dataDir string, logger *slog.Logger, registry network.Registry) *OrchestratorFactory {
+	if registry == nil {
+		registry = network.GlobalRegistry()
+	}
 	return &OrchestratorFactory{
-		dataDir: dataDir,
-		logger:  logger,
+		dataDir:  dataDir,
+		logger:   logger,
+		registry: registry,
 	}
 }
 
 // GetBuilder implements builder.PluginLoader interface.
 func (f *OrchestratorFactory) GetBuilder(pluginName string) (plugintypes.PluginBuilder, error) {
-	module, err := network.Get(pluginName)
+	module, err := f.registry.Get(pluginName)
 	if err != nil {
 		return nil, err
 	}
@@ -746,7 +751,7 @@ func (f *OrchestratorFactory) GetBuilder(pluginName string) (plugintypes.PluginB
 
 // GetPluginRuntime returns the PluginRuntime for a network.
 func (f *OrchestratorFactory) GetPluginRuntime(pluginName string) (runtime.PluginRuntime, error) {
-	module, err := network.Get(pluginName)
+	module, err := f.registry.Get(pluginName)
 	if err != nil {
 		return nil, err
 	}
@@ -781,7 +786,7 @@ func (f *OrchestratorFactory) AsPluginRuntimeProvider() runtime.PluginRuntimePro
 // (SkipStart=true in ProvisionOptions), so NodeRuntime is not needed.
 // Returns provisioner.Orchestrator interface for testability.
 func (f *OrchestratorFactory) CreateOrchestrator(networkName string) (provisioner.Orchestrator, error) {
-	module, err := network.Get(networkName)
+	module, err := f.registry.Get(networkName)
 	if err != nil {
 		return nil, err
 	}
@@ -830,13 +835,13 @@ func (f *OrchestratorFactory) CreateOrchestrator(networkName string) (provisione
 
 // ListAvailableNetworks returns the names of all registered networks.
 func (f *OrchestratorFactory) ListAvailableNetworks() []string {
-	return network.List()
+	return f.registry.List()
 }
 
 // GetNetworkDefaults returns default URLs for a network/plugin.
 // Implements provisioner.OrchestratorFactory interface.
 func (f *OrchestratorFactory) GetNetworkDefaults(pluginName, networkType string) (*provisioner.NetworkDefaults, error) {
-	module, err := network.Get(pluginName)
+	module, err := f.registry.Get(pluginName)
 	if err != nil {
 		return nil, err
 	}

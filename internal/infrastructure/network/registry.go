@@ -8,6 +8,19 @@ import (
 // DefaultNetworkName is empty - networks are loaded dynamically via plugins.
 const DefaultNetworkName = ""
 
+// Registry defines instance-scoped network registry operations.
+// Callers should depend on this interface instead of package globals.
+type Registry interface {
+	Register(module NetworkModule) error
+	MustRegister(module NetworkModule, panicOnError bool) error
+	Get(name string) (NetworkModule, error)
+	Has(name string) bool
+	List() []string
+	ListModules() []NetworkModule
+	Default() (NetworkModule, error)
+	SetDefault(name string) error
+}
+
 // Global registry instance
 //
 // Deprecated: Global registry is provided for backward compatibility.
@@ -20,8 +33,14 @@ var (
 
 // NewRegistry creates a new registry instance.
 // Use this when you need an independent registry (e.g., for testing).
-func NewRegistry() *registry {
+func NewRegistry() Registry {
 	return newRegistry()
+}
+
+// GlobalRegistry returns the package-level registry instance.
+// This exists for backward compatibility and explicit wiring into DI.
+func GlobalRegistry() Registry {
+	return globalRegistry
 }
 
 // registry holds registered network modules.
@@ -45,7 +64,7 @@ func newRegistry() *registry {
 //   - A module with the same name is already registered
 //   - The module fails validation
 func Register(module NetworkModule) {
-	if err := globalRegistry.register(module); err != nil {
+	if err := globalRegistry.Register(module); err != nil {
 		panic(err)
 	}
 }
@@ -53,17 +72,13 @@ func Register(module NetworkModule) {
 // MustRegister is like Register but allows specifying whether to panic on error.
 // If panicOnError is false, errors are silently ignored.
 func MustRegister(module NetworkModule, panicOnError bool) error {
-	err := globalRegistry.register(module)
-	if err != nil && panicOnError {
-		panic(err)
-	}
-	return err
+	return globalRegistry.MustRegister(module, panicOnError)
 }
 
 // Get retrieves a network module by name from the global registry.
 // Returns an error if the network is not registered.
 func Get(name string) (NetworkModule, error) {
-	return globalRegistry.get(name)
+	return globalRegistry.Get(name)
 }
 
 // MustGet retrieves a network module by name, panicking if not found.
@@ -77,32 +92,76 @@ func MustGet(name string) NetworkModule {
 
 // Has checks if a network is registered.
 func Has(name string) bool {
-	return globalRegistry.has(name)
+	return globalRegistry.Has(name)
 }
 
 // List returns all registered network names in sorted order.
 func List() []string {
-	return globalRegistry.list()
+	return globalRegistry.List()
 }
 
 // ListModules returns all registered network modules.
 func ListModules() []NetworkModule {
-	return globalRegistry.listModules()
+	return globalRegistry.ListModules()
 }
 
 // Default returns the default network module ("stable").
 // Returns an error if the default network is not registered.
 func Default() (NetworkModule, error) {
-	return globalRegistry.defaults_()
+	return globalRegistry.Default()
 }
 
 // SetDefault changes the default network name.
 // Returns an error if the network is not registered.
 func SetDefault(name string) error {
-	return globalRegistry.setDefault(name)
+	return globalRegistry.SetDefault(name)
 }
 
 // Registry methods
+
+// Register adds a module to this registry instance.
+func (r *registry) Register(module NetworkModule) error {
+	return r.register(module)
+}
+
+// MustRegister adds a module and optionally panics on error.
+func (r *registry) MustRegister(module NetworkModule, panicOnError bool) error {
+	err := r.register(module)
+	if err != nil && panicOnError {
+		panic(err)
+	}
+	return err
+}
+
+// Get returns a module by name from this registry instance.
+func (r *registry) Get(name string) (NetworkModule, error) {
+	return r.get(name)
+}
+
+// Has reports whether a module exists in this registry instance.
+func (r *registry) Has(name string) bool {
+	return r.has(name)
+}
+
+// List returns all module names in this registry instance.
+func (r *registry) List() []string {
+	return r.list()
+}
+
+// ListModules returns all modules in this registry instance.
+func (r *registry) ListModules() []NetworkModule {
+	return r.listModules()
+}
+
+// Default returns the default module in this registry instance.
+func (r *registry) Default() (NetworkModule, error) {
+	return r.defaults_()
+}
+
+// SetDefault changes the default module name in this registry instance.
+func (r *registry) SetDefault(name string) error {
+	return r.setDefault(name)
+}
 
 func (r *registry) register(module NetworkModule) error {
 	if module == nil {
@@ -212,10 +271,14 @@ func (r *registry) setDefault(name string) error {
 	return nil
 }
 
+func (r *registry) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.modules = make(map[string]NetworkModule)
+	r.defaults = DefaultNetworkName
+}
+
 // ResetRegistry clears all registered modules. This is primarily for testing.
 func ResetRegistry() {
-	globalRegistry.mu.Lock()
-	defer globalRegistry.mu.Unlock()
-	globalRegistry.modules = make(map[string]NetworkModule)
-	globalRegistry.defaults = DefaultNetworkName
+	globalRegistry.reset()
 }
